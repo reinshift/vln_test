@@ -1,0 +1,14 @@
+检测结果报告 - barrel_0.png
+图像路径: /catkin_ws/src/llm_model/src/images/barrel_0.png
+检测到的目标数量: 1
+
+类别统计:
+- barrel: 1个
+
+详细检测结果:
+
+目标 #1
+  - 类别: barrel
+  - 置信度: 0.5862
+  - 位置坐标: x1=460.8, y1=55.1, x2=635.3, y2=354.5
+  - 宽度: 174.5px, 高度: 299.4px

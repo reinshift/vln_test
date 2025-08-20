@@ -1,0 +1,37 @@
+地面小车为圆柱体，半径0.6m，高0.63m，车体坐标系的原点定义为机身圆柱体中心点在地面上的投影，xyz三轴方向
+均与世界坐标系相同
+
+# 摄像头内参
+image_width = 1080  
+image_height = 720  
+horizontal_fov = 2.0
+
+# 相机外参 (相机相对于机器人的位置和姿态)
+# 从URDF文件: origin xyz="0.5 -0.04 0.57" rpy="0 0.314 0"
+camera_translation = np.array([0.5, -0.04, 0.57])  # 相机位置
+camera_pitch = 0.314  # 相机俯仰角 (弧度)  
+
+# 其他摄像头参数
+camera_fov_horizontal = 114.6  # 水平视场角（度）
+camera_range = 5.0  # 摄像头最大探测距离（米）
+camera_height = 0.57  # 摄像头高度（米）
+
+# 激光雷达参数
+# 位置：[ -0.011, 0.023, 0.480 ]
+# 姿态：[ 180.000, 0.000, 0.000 ] # row, pitch, yaw 弧度制
+lidar_position_x = -0.011
+lidar_position_y = 0.023
+lidar_position_z = 0.480
+lidar_roll = 3.14159  # 180度转弧度
+lidar_pitch = 0.0
+lidar_yaw = 0.0
+
+# 激光雷达扫描参数
+lidar_samples = 1800  # 水平扫描点数
+lidar_resolution = 1
+lidar_min_angle = -3.14159  # -180度
+lidar_max_angle = 3.14159   # 180度
+lidar_min_range = 0.1
+lidar_max_range = 100.0
+lidar_range_resolution = 0.01
+lidar_noise_stddev = 0.01

@@ -1,0 +1,14 @@
+检测结果报告 - tractor_trailer_0.png
+图像路径: /catkin_ws/src/llm_model/src/images/tractor_trailer_0.png
+检测到的目标数量: 1
+
+类别统计:
+- tractor_trailer: 1个
+
+详细检测结果:
+
+目标 #1
+  - 类别: tractor_trailer
+  - 置信度: 0.7236
+  - 位置坐标: x1=151.5, y1=79.4, x2=1015.7, y2=395.6
+  - 宽度: 864.2px, 高度: 316.2px

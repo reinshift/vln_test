@@ -1,0 +1,5 @@
+# models
+llm_model/models/
+
+# pics
+**/*.png

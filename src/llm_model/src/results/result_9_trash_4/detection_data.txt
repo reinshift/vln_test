@@ -1,0 +1,14 @@
+检测结果报告 - trash_4.png
+图像路径: /catkin_ws/src/llm_model/src/images/trash_4.png
+检测到的目标数量: 1
+
+类别统计:
+- trash_bin: 1个
+
+详细检测结果:
+
+目标 #1
+  - 类别: trash_bin
+  - 置信度: 0.9107
+  - 位置坐标: x1=489.7, y1=164.9, x2=604.5, y2=349.0
+  - 宽度: 114.8px, 高度: 184.1px
