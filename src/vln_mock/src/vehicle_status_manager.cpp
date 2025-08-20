@@ -5,8 +5,14 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/LaserScan.h>
+#include <sensor_msgs/PointCloud2.h>
 #include <magv_vln_msgs/VehicleStatus.h>
 #include <magv_vln_msgs/PositionCommand.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <cmath>
+#include <limits>
 
 class VehicleStatusManager
 {
@@ -22,6 +28,7 @@ private:
     ros::Subscriber cmd_sub_;
     ros::Subscriber laser_sub_;
     ros::Subscriber goal_sub_;
+    ros::Subscriber pointcloud_sub_;
     
     // Timer for periodic status updates
     ros::Timer status_timer_;
@@ -34,32 +41,47 @@ private:
     bool navigation_initialized_;
     bool has_received_odom_;
     bool has_received_laser_;
+    bool has_received_pointcloud_;
     bool is_moving_;
     bool has_active_goal_;
+    bool emergency_stop_triggered_;
     
     geometry_msgs::Point last_position_;
     geometry_msgs::Point current_goal_;
     ros::Time last_movement_time_;
     ros::Time last_state_change_time_;
-    
+
+    // Emergency stop variables
+    double min_obstacle_distance_;
+    ros::Time last_pointcloud_time_;
+    uint8_t previous_state_;  // Store state before emergency stop
+
     // Parameters
     double status_publish_rate_;
     double movement_threshold_;
     double idle_timeout_;
+    double emergency_stop_distance_;
+    double pointcloud_timeout_;
 
 public:
-    VehicleStatusManager() : private_nh_("~"), 
+    VehicleStatusManager() : private_nh_("~"),
                            sensors_initialized_(false),
                            navigation_initialized_(false),
                            has_received_odom_(false),
                            has_received_laser_(false),
+                           has_received_pointcloud_(false),
                            is_moving_(false),
-                           has_active_goal_(false)
+                           has_active_goal_(false),
+                           emergency_stop_triggered_(false),
+                           min_obstacle_distance_(std::numeric_limits<double>::max()),
+                           previous_state_(magv_vln_msgs::VehicleStatus::STATE_IDLE)
     {
         // Load parameters
         private_nh_.param("status_publish_rate", status_publish_rate_, 2.0);
         private_nh_.param("movement_threshold", movement_threshold_, 0.1);
         private_nh_.param("idle_timeout", idle_timeout_, 30.0);
+        private_nh_.param("emergency_stop_distance", emergency_stop_distance_, 0.5);  // 0.5m default
+        private_nh_.param("pointcloud_timeout", pointcloud_timeout_, 2.0);  // 2s timeout
         
         // Initialize publishers
         status_pub_ = nh_.advertise<magv_vln_msgs::VehicleStatus>("/vln_status", 10);
@@ -69,6 +91,7 @@ public:
         cmd_sub_ = nh_.subscribe("/cmd_vel", 10, &VehicleStatusManager::cmdVelCallback, this);
         laser_sub_ = nh_.subscribe("/scan", 10, &VehicleStatusManager::laserCallback, this);
         goal_sub_ = nh_.subscribe("/move_base_simple/goal", 10, &VehicleStatusManager::goalCallback, this);
+        pointcloud_sub_ = nh_.subscribe("magv/scan/3d", 10, &VehicleStatusManager::pointcloudCallback, this);
         
         // Initialize status timer
         status_timer_ = nh_.createTimer(ros::Duration(1.0/status_publish_rate_), 
@@ -165,10 +188,10 @@ public:
     {
         has_active_goal_ = true;
         current_goal_ = msg->pose.position;
-        
-        ROS_INFO("Received new navigation goal: [%.2f, %.2f]", 
+
+        ROS_INFO("Received new navigation goal: [%.2f, %.2f]",
                  current_goal_.x, current_goal_.y);
-        
+
         // TODO: Implement goal validation logic
         // Example logic:
         /*
@@ -176,6 +199,72 @@ public:
         // Check if goal is within map bounds
         // Check if goal is not in obstacle
         */
+    }
+
+    void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg)
+    {
+        if (!has_received_pointcloud_) {
+            has_received_pointcloud_ = true;
+            ROS_INFO("Received first pointcloud message");
+        }
+
+        last_pointcloud_time_ = ros::Time::now();
+
+        // Convert ROS PointCloud2 to PCL
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
+        try {
+            pcl::fromROSMsg(*msg, *cloud);
+        } catch (const std::exception& e) {
+            ROS_ERROR("PCL conversion failed: %s", e.what());
+            return;
+        }
+
+        // Calculate minimum distance to obstacles
+        min_obstacle_distance_ = calculateMinObstacleDistance(cloud);
+
+        // Check for emergency stop condition
+        if (min_obstacle_distance_ < emergency_stop_distance_) {
+            if (!emergency_stop_triggered_) {
+                // Store current state before switching to emergency stop
+                previous_state_ = current_status_.state;
+                emergency_stop_triggered_ = true;
+                ROS_WARN("EMERGENCY STOP TRIGGERED! Obstacle detected at %.2fm (threshold: %.2fm)",
+                         min_obstacle_distance_, emergency_stop_distance_);
+            }
+        } else {
+            // Clear emergency stop if distance is safe again
+            if (emergency_stop_triggered_ && min_obstacle_distance_ > emergency_stop_distance_ + 0.1) {
+                emergency_stop_triggered_ = false;
+                ROS_INFO("Emergency stop cleared. Distance: %.2fm", min_obstacle_distance_);
+            }
+        }
+
+
+    }
+
+    double calculateMinObstacleDistance(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud)
+    {
+        double min_distance = std::numeric_limits<double>::max();
+
+        // Vehicle position is at origin (0, 0, 0) in base_link frame
+        for (const auto& point : cloud->points) {
+            // Skip invalid points
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+                continue;
+            }
+
+            // Calculate 2D distance (ignore z for ground-based vehicle)
+            double distance = sqrt(point.x * point.x + point.y * point.y);
+
+            // Consider all points above ground level
+            if (point.z > 0.0) {
+                if (distance < min_distance) {
+                    min_distance = distance;
+                }
+            }
+        }
+
+        return min_distance;
     }
     
     void statusTimerCallback(const ros::TimerEvent& event)
@@ -190,14 +279,32 @@ public:
         std::string new_description = current_status_.state_description;
         std::string diagnostic = "";
         
-        // Update sensor and navigation readiness
+        // Update sensor and navigation readiness (for normal operations)
         current_status_.sensors_ready = has_received_odom_ && has_received_laser_;
         current_status_.navigation_ready = current_status_.sensors_ready; // Add more conditions as needed
+
+        // Check for emergency stop condition first (highest priority)
+        // Emergency stop only needs pointcloud data, not other sensors
+        if (has_received_pointcloud_ && emergency_stop_triggered_) {
+            if (current_status_.state != magv_vln_msgs::VehicleStatus::STATE_EMERGENCY_STOP) {
+                new_state = magv_vln_msgs::VehicleStatus::STATE_EMERGENCY_STOP;
+                new_description = "Emergency Stop - Obstacle Too Close";
+                diagnostic = "Obstacle detected at " + std::to_string(min_obstacle_distance_) + "m (threshold: " + std::to_string(emergency_stop_distance_) + "m)";
+            }
+        } else if (has_received_pointcloud_ && current_status_.state == magv_vln_msgs::VehicleStatus::STATE_EMERGENCY_STOP && !emergency_stop_triggered_) {
+            // Recovery from emergency stop - return to previous state or idle
+            new_state = (previous_state_ == magv_vln_msgs::VehicleStatus::STATE_EMERGENCY_STOP) ?
+                        magv_vln_msgs::VehicleStatus::STATE_IDLE : previous_state_;
+            new_description = "Recovered from Emergency Stop";
+            diagnostic = "Safe distance restored: " + std::to_string(min_obstacle_distance_) + "m";
+        }
         
         // TODO: Implement comprehensive state transition logic
         // This is a basic framework - expand based on your specific requirements
-        
-        switch (current_status_.state) {
+
+        // Only proceed with normal state logic if not in emergency stop or emergency stop not triggered
+        if (!emergency_stop_triggered_ && current_status_.state != magv_vln_msgs::VehicleStatus::STATE_EMERGENCY_STOP) {
+            switch (current_status_.state) {
             case magv_vln_msgs::VehicleStatus::STATE_INITIALIZING:
                 diagnostic = "Waiting for sensors and navigation stack";
                 
@@ -261,7 +368,7 @@ public:
                 
             case magv_vln_msgs::VehicleStatus::STATE_ERROR:
                 diagnostic = "Error state - manual intervention may be required";
-                
+
                 // TODO: Add error recovery logic
                 /*
                 if (error_resolved()) {
@@ -270,10 +377,20 @@ public:
                 }
                 */
                 break;
-                
+
+            case magv_vln_msgs::VehicleStatus::STATE_EMERGENCY_STOP:
+                // Emergency stop state - vehicle should be stopped
+                // This state is handled by the emergency stop logic above
+                // No additional transitions needed here as emergency stop has highest priority
+                if (!emergency_stop_triggered_) {
+                    // This case is handled above in the emergency stop recovery logic
+                }
+                break;
+
             default:
                 diagnostic = "Unknown state";
                 break;
+            }
         }
         
         // Update state if changed
@@ -302,7 +419,7 @@ public:
         
         // Log status periodically
         static ros::Time last_log_time = ros::Time::now();
-        if ((ros::Time::now() - last_log_time).toSec() > 10.0) {
+        if ((ros::Time::now() - last_log_time).toSec() > 2.0) {
             ROS_INFO("Vehicle Status: %s | Moving: %s | Goal: %s | Sensors: %s", 
                      current_status_.state_description.c_str(),
                      current_status_.is_moving ? "Yes" : "No",
