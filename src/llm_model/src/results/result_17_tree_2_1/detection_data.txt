@@ -1,5 +1,0 @@
-检测结果报告 - tree_2_1.png
-图像路径: /catkin_ws/src/llm_model/src/images/tree_2_1.png
-检测到的目标数量: 0
-
-类别统计:
