@@ -17,7 +17,10 @@ from geometry_msgs.msg import Point, Twist, PoseStamped, Quaternion
 from sensor_msgs.msg import CompressedImage
 
 # Custom Messages
-from magv_vln_msgs.msg import VehicleStatus, ValueMap, PathPoint, PositionCommand, DetectedObjectArray
+from magv_vln_msgs.msg import (
+    VehicleStatus, ValueMap, PathPoint, PositionCommand,
+    DetectedObjectArray, Detection2DArray
+)
 from aruco_detector.msg import ArucoInfo, ArucoMarker
 
 class CoreNode:
@@ -34,9 +37,12 @@ class CoreNode:
         self.current_path_points = []
         self.current_path_index = 0
         self.aruco_detections = []
-        self.detected_objects = {}
+        self.detected_objects = {} # Stores positions of detected objects
+        self.directional_detections = {} # Stores {label: [(yaw, detection_msg)]}
         self.navigation_active = False
+        self.scan_and_plan_complete = False
         self.task_completed = False
+        self.current_yaw = 0.0
         self.current_pose = None
 
         # Thread safety
@@ -50,6 +56,7 @@ class CoreNode:
         self.status_feedback_pub = rospy.Publisher('/core_feedback', String, queue_size=10)
         self.vlm_query_pub = rospy.Publisher('/vlm_query', String, queue_size=10)
         self.final_status_pub = rospy.Publisher('/status', Int32, queue_size=10)
+        self.dino_prompt_pub = rospy.Publisher('/grounding_dino/prompt', String, queue_size=10)
 
         # Subscribers
         self.vln_status_sub = rospy.Subscriber('/vln_status', VehicleStatus, self.vln_status_callback, queue_size=1)
@@ -57,14 +64,20 @@ class CoreNode:
         self.aruco_info_sub = rospy.Subscriber('/aruco_info', ArucoInfo, self.aruco_info_callback, queue_size=1)
         self.image_sub = rospy.Subscriber('/magv/camera/image_compressed', CompressedImage, self.image_callback, queue_size=1)
         self.vlm_response_sub = rospy.Subscriber('/vlm_response', String, self.vlm_response_callback, queue_size=1)
-        self.detected_objects_sub = rospy.Subscriber('/detected_objects', DetectedObjectArray, self.detected_objects_callback, queue_size=1)
-        self.odom_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
+        self.odometry_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
+        self.dino_detections_sub = rospy.Subscriber('/grounding_dino/detections', Detection2DArray, self.dino_detections_callback, queue_size=1)
+
 
         # Parameters
         self.grid_resolution = rospy.get_param('~grid_resolution', 0.1)  # meters per cell
         self.path_planning_distance = rospy.get_param('~path_planning_distance', 2.0)  # meters
         self.goal_tolerance = rospy.get_param('~goal_tolerance', 0.5)  # meters
         self.aruco_detection_threshold = rospy.get_param('~aruco_detection_threshold', 0.3)  # meters
+
+        # Camera parameters for projecting detections
+        self.image_width = rospy.get_param('~image_width', 1080)
+        self.horizontal_fov = rospy.get_param('~horizontal_fov', 2.0) # radians
+        self.f_x = (self.image_width / 2.0) / np.tan(self.horizontal_fov / 2.0)
 
         # Control timer for navigation
         self.control_timer = rospy.Timer(rospy.Duration(0.1), self.control_timer_callback)
@@ -104,31 +117,109 @@ class CoreNode:
                 self.handle_emergency_stop()
 
     def handle_initialization_state(self):
-        """Handle initialization state - compute value map and path points"""
-        rospy.loginfo("Handling initialization state...")
+        """
+        Handle initialization state.
+        This now involves a "scan and plan" phase where the robot rotates
+        to build a map of its surroundings using GroundingDINO before planning.
+        """
+        if self.scan_and_plan_complete:
+            rospy.loginfo("Scan and plan already complete for this subtask.")
+            # Notify state machine again in case the first message was missed
+            feedback_msg = String()
+            feedback_msg.data = json.dumps({
+                "status": "initialization_complete",
+                "path_points_count": len(self.current_path_points)
+            })
+            self.status_feedback_pub.publish(feedback_msg)
+            return
+
+        rospy.loginfo("Starting scan and plan phase...")
 
         if not self.current_subtask:
-            rospy.logwarn("No current subtask available for initialization")
+            rospy.logwarn("No current subtask available for initialization.")
             return
+
+        # 1. Publish the goal object as a prompt for GroundingDINO
+        goal = self.current_subtask.get('goal', None)
+        if goal and goal != 'null':
+            prompt_msg = String()
+            prompt_msg.data = goal
+            self.dino_prompt_pub.publish(prompt_msg)
+            rospy.loginfo(f"Published GroundingDINO prompt: '{goal}'")
+        else:
+            rospy.loginfo("No specific goal in subtask, will rely on directional guidance.")
+
+        # 2. Command the robot to perform a 360-degree scan
+        rospy.loginfo("Commanding 360-degree rotation for scanning...")
+        scan_cmd = Twist()
+        scan_cmd.angular.z = 0.5  # rad/s
+        self.controller_continuous_pub.publish(scan_cmd)
+
+        # 3. Use a timer to stop the scan and trigger planning
+        # A 360-degree turn at 0.5 rad/s takes about 12.6 seconds. Give it 13 seconds.
+        rospy.Timer(rospy.Duration(13.0), self.finish_scan_and_plan, oneshot=True)
+
+    def finish_scan_and_plan(self, event):
+        """
+        Called by a timer after the robot has finished its 360-degree scan.
+        Stops the robot, computes the map, generates a path, and notifies the state machine.
+        """
+        rospy.loginfo("Rotation finished. Stopping robot and starting planning.")
+
+        # 1. Stop the robot's rotation
+        stop_cmd = Twist()
+        self.controller_continuous_pub.publish(stop_cmd)
+
+        # Clear the GroundingDINO prompt
+        self.dino_prompt_pub.publish(String(data=""))
 
         if self.occupancy_grid is None:
-            rospy.logwarn("No occupancy grid available, requesting grid generation...")
-            # Request grid generation (this would typically be handled by pointcloud_to_grid node)
+            rospy.logerr("Cannot plan without an occupancy grid!")
+            # Optionally, you could add logic here to notify the state machine of a failure.
             return
 
-        # Compute value map based on current subtask
+        # 2. Compute the value map using the data gathered during the scan
         self.compute_value_map()
 
-        # Generate path points
+        # 3. Generate path points based on the new value map
         self.generate_path_points()
 
-        # Notify state machine that initialization is complete
+        # 4. Mark this phase as complete and notify the state machine
+        self.scan_and_plan_complete = True
         feedback_msg = String()
         feedback_msg.data = json.dumps({
             "status": "initialization_complete",
             "path_points_count": len(self.current_path_points)
         })
         self.status_feedback_pub.publish(feedback_msg)
+        rospy.loginfo("Scan and plan phase complete. Notified state machine.")
+
+    def odometry_callback(self, msg):
+        """Update the robot's current yaw from odometry data."""
+        orientation_q = msg.pose.pose.orientation
+        euler = tfs.euler_from_quaternion([
+            orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w
+        ])
+        self.current_yaw = euler[2]
+
+    def dino_detections_callback(self, msg):
+        """
+        Store detections from GroundingDINO, associating them with the current yaw.
+        This is crucial for the rotational scan.
+        """
+        # Only store detections if we are in the initialization (scanning) phase
+        if self.current_state != VehicleStatus.STATE_INITIALIZING:
+            return
+
+        for detection in msg.detections:
+            label = detection.label
+            if label not in self.directional_detections:
+                self.directional_detections[label] = []
+            # Store the yaw and the full detection message
+            self.directional_detections[label].append((self.current_yaw, detection))
+            rospy.logdebug(f"Stored detection for '{label}' at yaw {self.current_yaw:.2f}")
+
+
 
     def vlm_response_callback(self, msg):
         """Handle VLM response"""
@@ -164,15 +255,6 @@ class CoreNode:
             if self.navigation_active:
                 self.handle_aruco_detection()
 
-    def detected_objects_callback(self, msg):
-        """Handle detected object updates from the simulator."""
-        # Group objects by label for efficient lookup
-        self.detected_objects = {}
-        for obj in msg.objects:
-            if obj.label not in self.detected_objects:
-                self.detected_objects[obj.label] = []
-            self.detected_objects[obj.label].append(obj.position)
-        rospy.logdebug(f"Updated detected objects: {list(self.detected_objects.keys())}")
 
     def image_callback(self, msg):
         """Handle camera image updates (for VLM queries)"""
@@ -240,8 +322,67 @@ class CoreNode:
         rospy.loginfo("Value map computed and published")
 
     def compute_cell_value(self, x, y, direction, goal, current_yaw):
-        """Compute value for a single cell based on direction and goal, relative to robot's orientation"""
+        """
+        Compute value for a single cell. This now prioritizes directional detections
+        from the rotational scan, creating high-value sectors in the direction
+        where the goal object was seen.
+        """
         base_value = 0.0
+        goal_seen = False
+
+        # --- Directional Value from Rotational Scan ---
+        if goal and goal in self.directional_detections:
+            cell_angle = math.atan2(y, x)
+
+            for (detection_yaw, detection) in self.directional_detections[goal]:
+                # Calculate the angular cone where the object was detected
+                bbox = detection.bbox
+                center_pixel = bbox.center.x
+                width_pixel = bbox.size_x
+
+                # Angle of the bbox center relative to the camera's center view
+                center_angle_offset = math.atan((self.image_width / 2 - center_pixel) / self.f_x)
+                half_width_angle = math.atan((width_pixel / 2) / self.f_x)
+
+                # The absolute angle in the world frame where the object was detected
+                absolute_detection_angle = self.normalize_angle(detection_yaw + center_angle_offset)
+                angle_diff = self.normalize_angle(cell_angle - absolute_detection_angle)
+
+                # Check if the cell's angle is within the detection cone
+                if abs(angle_diff) < half_width_angle:
+                    goal_seen = True
+                    confidence_bonus = detection.score
+                    angle_bonus = 1 - (abs(angle_diff) / half_width_angle) # 1 at center, 0 at edge
+                    distance = math.sqrt(x**2 + y**2)
+                    distance_penalty = math.exp(-0.1 * distance) # Prefer closer areas
+
+                    base_value += 500.0 * confidence_bonus * angle_bonus * distance_penalty
+
+        # --- Fallback: Directional Guidance (if goal was not seen or no goal) ---
+        if not goal_seen:
+            # Convert cell position to robot's local frame for directional calculation
+            local_x = x * math.cos(-current_yaw) - y * math.sin(-current_yaw)
+            local_y = x * math.sin(-current_yaw) + y * math.cos(-current_yaw)
+
+            if direction == 'forward':
+                base_value += local_x * 10.0
+            elif direction == 'backward':
+                base_value -= local_x * 10.0
+            elif direction == 'left':
+                base_value += local_y * 10.0
+            elif direction == 'right':
+                base_value -= local_y * 10.0
+
+        base_value += np.random.normal(0, 1.0)
+        return base_value
+
+    def normalize_angle(self, angle):
+        """Normalize angle to [-pi, pi]"""
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
 
         # Transform cell coordinates relative to the robot's current position and orientation
         robot_x = self.current_pose.position.x if self.current_pose else 0

@@ -36,6 +36,8 @@
         <param name="path_planning_distance" value="2.0"/>
         <param name="goal_tolerance" value="0.5"/>
         <param name="aruco_detection_threshold" value="0.3"/>
+        <param name="image_width" value="1080"/>
+        <param name="horizontal_fov" value="2.0"/>
     </node>
 
     <!-- Controller Node -->
@@ -68,11 +70,10 @@
         <param name="maph_topic_name" value="/height_grid"/>
     </node>
 
-    <!-- GroundDino Simulator Node -->
-    <node name="ground_dino_simulator" pkg="vln_mock" type="ground_dino_simulator.py" output="screen">
-        <param name="publish_rate" value="1.0"/>
-        <param name="detection_radius" value="15.0"/>
-        <param name="num_objects" value="8"/>
+    <!-- Real GroundingDINO Node -->
+    <node name="grounding_dino_node" pkg="llm_model" type="grounding_dino_node.py" output="screen">
+        <param name="box_threshold" value="0.35"/>
+        <param name="text_threshold" value="0.25"/>
     </node>
 
     <!-- RViz for visualization (optional) -->

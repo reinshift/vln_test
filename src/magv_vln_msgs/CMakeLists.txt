@@ -20,6 +20,9 @@ add_message_files(
       PathPoint.msg
       DetectedObject.msg
       DetectedObjectArray.msg
+      BoundingBox2D.msg
+      Detection2D.msg
+      Detection2DArray.msg
 )
 
 generate_messages(
