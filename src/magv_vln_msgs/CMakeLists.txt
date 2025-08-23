@@ -15,6 +15,11 @@ add_message_files(
     FILES
       PositionCommand.msg
       VehicleStatus.msg
+      SubTask.msg
+      ValueMap.msg
+      PathPoint.msg
+      DetectedObject.msg
+      DetectedObjectArray.msg
 )
 
 generate_messages(

@@ -35,3 +35,12 @@ time last_state_change
 
 # Additional diagnostic information
 string diagnostic_info
+
+# Current subtask information (for VLN)
+string current_subtask_json
+int32 current_subtask_index
+int32 total_subtasks
+
+# Task completion status
+bool task_completed
+string completion_message

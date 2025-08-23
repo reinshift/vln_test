@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import rospy
@@ -18,13 +18,18 @@ from aruco_detector.msg import ArucoInfo, ArucoMarker
 
 class ArucoDetectorNode:
     def __init__(self):
-        rospy.init_node('aruco_detector_node', anonymous=True)
+        rospy.loginfo("ArUco Detector Node Initializing...")
         rospy.loginfo("ArUco Detector Node Initializing...")
 
         # --- Parameters ---
         self.marker_size = rospy.get_param('~marker_size', 0.1)  # ArUco码的物理边长 (米)
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
         self.aruco_params = cv2.aruco.DetectorParameters()
+
+        # Historical ArUco detection tracking
+        self.historical_detections = {}  # {marker_id: [world_positions]}
+        self.detection_threshold = rospy.get_param('~detection_threshold', 0.3)  # meters
+        self.max_history_size = rospy.get_param('~max_history_size', 10)
 
         # --- Camera Intrinsics ---
         image_width = rospy.get_param('~image_width', 1080)
@@ -44,8 +49,11 @@ class ArucoDetectorNode:
         rospy.loginfo(f"Camera Matrix calculated:\n{self.camera_matrix}")
 
         # --- Camera Extrinsics (Camera to Robot Base) ---
-        cam_trans = np.array([0.5, -0.04, 0.57])
-        cam_pitch = 0.314 # rpy="0 0.314 0"
+        cam_trans_x = rospy.get_param('~camera_translation_x', 0.5)
+        cam_trans_y = rospy.get_param('~camera_translation_y', -0.04)
+        cam_trans_z = rospy.get_param('~camera_translation_z', 0.57)
+        cam_trans = np.array([cam_trans_x, cam_trans_y, cam_trans_z])
+        cam_pitch = rospy.get_param('~camera_pitch', 0.314) # rpy="0 0.314 0"
         cam_rot_matrix = tfs.euler_matrix(0, cam_pitch, 0, 'sxyz')[:3, :3]
         self.T_robot_camera = np.eye(4)
         self.T_robot_camera[:3, :3] = cam_rot_matrix
@@ -61,12 +69,36 @@ class ArucoDetectorNode:
         self.odom_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
         self.aruco_pub = rospy.Publisher('/aruco_info', ArucoInfo, queue_size=10)
 
+        # Subscriber for core node requests to ignore certain ArUco markers
+        self.ignore_aruco_sub = rospy.Subscriber('/ignore_aruco', ArucoMarker, self.ignore_aruco_callback, queue_size=10)
+
         rospy.loginfo("Initialization complete. Waiting for topics...")
 
     def odometry_callback(self, msg):
         self.latest_odometry = msg
 
+    def ignore_aruco_callback(self, msg):
+        """Handle requests to ignore certain ArUco markers"""
+        marker_id = msg.id
+        world_pos = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
+
+        # Add to historical detections to prevent future publishing
+        if marker_id not in self.historical_detections:
+            self.historical_detections[marker_id] = []
+
+        self.historical_detections[marker_id].append(world_pos)
+
+        # Limit history size
+        if len(self.historical_detections[marker_id]) > self.max_history_size:
+            self.historical_detections[marker_id].pop(0)
+
+        rospy.loginfo(f"Added ArUco marker {marker_id} to ignore list at position {world_pos}")
+
     def image_callback(self, msg):
+        if self.latest_odometry is None:
+            rospy.logwarn_throttle(5.0, "No odometry received yet, skipping ArUco detection.")
+            return
+
         try:
             np_arr = np.frombuffer(msg.data, np.uint8)
             cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -78,7 +110,8 @@ class ArucoDetectorNode:
         corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
 
         aruco_info_msg = ArucoInfo()
-        aruco_info_msg.header = msg.header
+        aruco_info_msg.header.stamp = self.latest_odometry.header.stamp
+        aruco_info_msg.header.frame_id = self.latest_odometry.child_frame_id
 
         if ids is not None:
             rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
@@ -98,27 +131,80 @@ class ArucoDetectorNode:
                 # Transform marker pose to robot base frame
                 T_robot_marker = np.dot(self.T_robot_camera, T_camera_marker)
 
-                # Create ArucoMarker message
-                marker_msg = ArucoMarker()
-                marker_msg.id = marker_id[0]
-                
-                trans = tfs.translation_from_matrix(T_robot_marker)
-                quat = tfs.quaternion_from_matrix(T_robot_marker)
+                # Transform marker pose to world frame using odometry
+                if self.latest_odometry is None:
+                    rospy.logwarn_throttle(5.0, "No odometry received yet, skipping marker processing.")
+                    continue
 
-                marker_msg.pose.position.x = trans[0]
-                marker_msg.pose.position.y = trans[1]
-                marker_msg.pose.position.z = trans[2]
-                marker_msg.pose.orientation.x = quat[0]
-                marker_msg.pose.orientation.y = quat[1]
-                marker_msg.pose.orientation.z = quat[2]
-                marker_msg.pose.orientation.w = quat[3]
+                odom_pose = self.latest_odometry.pose.pose
+                odom_pos = np.array([odom_pose.position.x, odom_pose.position.y, odom_pose.position.z])
+                odom_quat = np.array([odom_pose.orientation.x, odom_pose.orientation.y, odom_pose.orientation.z, odom_pose.orientation.w])
 
-                aruco_info_msg.markers.append(marker_msg)
-        
+                T_world_robot = tfs.quaternion_matrix(odom_quat)
+                T_world_robot[:3, 3] = odom_pos
+
+                T_world_marker = np.dot(T_world_robot, T_robot_marker)
+                world_pos = tfs.translation_from_matrix(T_world_marker)
+
+                # Check if this marker has been detected before at a similar location
+                if not self.is_duplicate_detection(marker_id[0], world_pos):
+                    # Create ArucoMarker message
+                    marker_msg = ArucoMarker()
+                    marker_msg.id = marker_id[0]
+
+                    trans = tfs.translation_from_matrix(T_robot_marker)
+                    quat = tfs.quaternion_from_matrix(T_robot_marker)
+
+                    marker_msg.pose.position.x = trans[0]
+                    marker_msg.pose.position.y = trans[1]
+                    marker_msg.pose.position.z = trans[2]
+                    marker_msg.pose.orientation.x = quat[0]
+                    marker_msg.pose.orientation.y = quat[1]
+                    marker_msg.pose.orientation.z = quat[2]
+                    marker_msg.pose.orientation.w = quat[3]
+
+                    aruco_info_msg.markers.append(marker_msg)
+
+                    # Add to historical detections
+                    self.add_to_history(marker_id[0], world_pos)
+                else:
+                    rospy.logdebug(f"Skipping duplicate detection of ArUco marker {marker_id[0]}")
+
         self.aruco_pub.publish(aruco_info_msg)
+
+    def is_duplicate_detection(self, marker_id, world_pos):
+        """Check if this ArUco marker has been detected before at a similar location"""
+        if marker_id not in self.historical_detections:
+            return False
+
+        # Check if any previous detection is within threshold distance
+        for prev_pos in self.historical_detections[marker_id]:
+            distance = np.sqrt(
+                (world_pos[0] - prev_pos[0])**2 +
+                (world_pos[1] - prev_pos[1])**2 +
+                (world_pos[2] - prev_pos[2])**2
+            )
+            if distance < self.detection_threshold:
+                return True
+
+        return False
+
+    def add_to_history(self, marker_id, world_pos):
+        """Add a new detection to the historical record"""
+        if marker_id not in self.historical_detections:
+            self.historical_detections[marker_id] = []
+
+        self.historical_detections[marker_id].append(list(world_pos))
+
+        # Limit history size
+        if len(self.historical_detections[marker_id]) > self.max_history_size:
+            self.historical_detections[marker_id].pop(0)
+
+        rospy.logdebug(f"Added ArUco marker {marker_id} detection at {world_pos}")
 
 if __name__ == '__main__':
     try:
+        rospy.init_node('aruco_detector_node', anonymous=True)
         node = ArucoDetectorNode()
         rospy.spin()
     except rospy.ROSInterruptException:

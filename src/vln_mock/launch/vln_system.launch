@@ -1,0 +1,81 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- VLN System Launch File -->
+    <!-- This launch file starts all the necessary nodes for the VLN system -->
+
+    <!-- Parameters -->
+    <param name="use_sim_time" value="false"/>
+
+    <!-- ArUco Detector Node -->
+    <node name="aruco_detector_node" pkg="aruco_detector" type="aruco_node.py" output="screen">
+        <param name="marker_size" value="0.1"/>
+        <param name="image_width" value="1080"/>
+        <param name="image_height" value="720"/>
+        <param name="horizontal_fov" value="2.0"/>
+        <param name="camera_translation_x" value="0.5"/>
+        <param name="camera_translation_y" value="-0.04"/>
+        <param name="camera_translation_z" value="0.57"/>
+        <param name="camera_pitch" value="0.314"/>
+        <param name="detection_threshold" value="0.3"/>
+        <param name="max_history_size" value="10"/>
+    </node>
+
+    <!-- Instruction Processor (VLM) Node -->
+    <node name="instruction_processor" pkg="llm_model" type="process_ins.py" output="screen">
+        <param name="model_path" value="$(find llm_model)/models/Qwen2.5-VL-7B-Instruct"/>
+    </node>
+
+    <!-- Vehicle Status Manager -->
+    <node name="vehicle_status_manager" pkg="vln_mock" type="vehicle_status_manager.py" output="screen">
+        <param name="emergency_stop_distance" value="0.5"/>
+    </node>
+
+    <!-- Core Node -->
+    <node name="core_node" pkg="vln_mock" type="core_node.py" output="screen">
+        <param name="grid_resolution" value="0.1"/>
+        <param name="path_planning_distance" value="2.0"/>
+        <param name="goal_tolerance" value="0.5"/>
+        <param name="aruco_detection_threshold" value="0.3"/>
+    </node>
+
+    <!-- Controller Node -->
+    <node name="controller" pkg="vln_mock" type="controller.py" output="screen">
+        <param name="position_kp" value="1.0"/>
+        <param name="position_ki" value="0.0"/>
+        <param name="position_kd" value="0.1"/>
+        <param name="orientation_kp" value="2.0"/>
+        <param name="orientation_ki" value="0.0"/>
+        <param name="orientation_kd" value="0.1"/>
+        <param name="max_linear_vel" value="1.0"/>
+        <param name="max_angular_vel" value="1.0"/>
+        <param name="position_tolerance" value="0.1"/>
+        <param name="orientation_tolerance" value="0.1"/>
+        <param name="position_integral_clamp" value="1.0"/>
+        <param name="orientation_integral_clamp" value="0.5"/>
+    </node>
+
+    <!-- Pointcloud to Grid Node -->
+    <node name="pointcloud_to_grid_node" pkg="pointcloud_to_grid" type="pointcloud_to_grid_node" output="screen">
+        <param name="cell_size" value="0.1"/>
+        <param name="length_x" value="20.0"/>
+        <param name="length_y" value="20.0"/>
+        <param name="position_x" value="0.0"/>
+        <param name="position_y" value="0.0"/>
+        <param name="intensity_factor" value="1.0"/>
+        <param name="height_factor" value="10.0"/>
+        <param name="cloud_in_topic" value="/magv/scan/3d"/>
+        <param name="mapi_topic_name" value="/occupancy_grid"/>
+        <param name="maph_topic_name" value="/height_grid"/>
+    </node>
+
+    <!-- GroundDino Simulator Node -->
+    <node name="ground_dino_simulator" pkg="vln_mock" type="ground_dino_simulator.py" output="screen">
+        <param name="publish_rate" value="1.0"/>
+        <param name="detection_radius" value="15.0"/>
+        <param name="num_objects" value="8"/>
+    </node>
+
+    <!-- RViz for visualization (optional) -->
+    <!-- <node name="rviz" pkg="rviz" type="rviz" output="screen" required="false"/> -->
+
+</launch>

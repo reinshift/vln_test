@@ -20,6 +20,7 @@ find_package(catkin REQUIRED COMPONENTS
   pcl_ros
   roscpp
 )
+find_package(OpenCV REQUIRED)
 
 
 ## Generate dynamic reconfigure parameters in the 'cfg' folder
@@ -33,8 +34,8 @@ catkin_package(
   #CATKIN_DEPENDS dynamic_reconfigure nav_msgs pcl_ros roscpp
   #DEPENDS roscpp std_msgs
 )
-  
-  
+
+
 ## Specify additional locations of header files
 ## Your package locations should be listed before other locations
 include_directories(
@@ -44,9 +45,8 @@ include_directories(
   )
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
-  
+
 add_executable(pointcloud_to_grid_node src/pointcloud_to_grid_node.cpp)
 #add_dependencies(pointcloud_to_map_node ${PROJECT_NAME}_gencfg)
 target_link_libraries(pointcloud_to_grid_node ${catkin_LIBRARIES} ${OpenCV_LIBS} ${PCL_LIBRARIES})
-  
-  
+

@@ -16,52 +16,46 @@ public:
 };
 
 class GridMap{
-  public: 
-    float position_x;
-    float position_y;
-    float cell_size;
-    float length_x;
-    float length_y;
+  public:
+    double position_x;
+    double position_y;
+    double cell_size;
+    double length_x;
+    double length_y;
     std::string cloud_in_topic;
     std::string frame_out;
     std::string mapi_topic_name;
     std::string maph_topic_name;
-    float topleft_x;
-    float topleft_y;
-    float bottomright_x;
-    float bottomright_y;
+    double topleft_x;
+    double topleft_y;
+    double bottomright_x;
+    double bottomright_y;
     int cell_num_x;
     int cell_num_y;
-    float intensity_factor;
-    float height_factor;
-
-
+    double intensity_factor;
+    double height_factor;
 
     void initGrid(nav_msgs::OccupancyGridPtr grid) {
-      grid->header.seq = 1;
-      grid->header.frame_id = GridMap::frame_out; // TODO
-      grid->info.origin.position.z = 0;
-      grid->info.origin.orientation.w = 0;
-      grid->info.origin.orientation.x = 0;
-      grid->info.origin.orientation.y = 0;
-      grid->info.origin.orientation.z = 1;
-      grid->info.origin.position.x = position_x + length_x / 2;
-      grid->info.origin.position.y = position_y + length_y / 2;
-      grid->info.width = length_x / cell_size;
-      grid->info.height = length_y /cell_size;
+      grid->header.frame_id = frame_out;
       grid->info.resolution = cell_size;
-      // resolution/grid size [m/cell]
+      grid->info.width = cell_num_x;
+      grid->info.height = cell_num_y;
+      grid->info.origin.position.x = topleft_x;
+      grid->info.origin.position.y = bottomright_y;
+      grid->info.origin.position.z = 0;
+      grid->info.origin.orientation.w = 1;
+      grid->data.assign(cell_num_x * cell_num_y, -1);
     }
-    
+
     void paramRefresh(){
-      topleft_x = position_x + length_x / 2;
-      bottomright_x = position_x - length_x / 2;
-      topleft_y = position_y + length_y / 2;
-      bottomright_y = position_y - length_y / 2;
-      cell_num_x = int(length_x / cell_size);
-      cell_num_y = int(length_y / cell_size);
+      topleft_x = position_x - length_x / 2.0;
+      bottomright_x = position_x + length_x / 2.0;
+      topleft_y = position_y + length_y / 2.0;
+      bottomright_y = position_y - length_y / 2.0;
+      cell_num_x = round(length_x / cell_size);
+      cell_num_y = round(length_y / cell_size);
       if(cell_num_x > 0){
-        ROS_INFO_STREAM("Cells: " << cell_num_x << "*" << cell_num_y << "px, subscribed to " << GridMap::cloud_in_topic << " [" << topleft_x << ", " << topleft_y << "]" << " [" << bottomright_x << ", " << bottomright_y << "]");
+        ROS_INFO_STREAM("Grid Cells: " << cell_num_x << "x" << cell_num_y << ", Subscribed to: " << cloud_in_topic);
       }
     }
 
