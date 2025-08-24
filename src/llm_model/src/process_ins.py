@@ -180,7 +180,7 @@ class InstructionProcessorNode:
         # Mapping of direction keywords
         # Mapping of direction keywords
         dir_map = {
-            "forward": ["forward", "straight", "ahead", "move until"],
+            "forward": ["forward", "straight", "ahead", "move until", "go", "move"],
             "backward": ["turn back", "back", "backward", "turn around"],
             "left": ["left", "left side"],
             "right": ["right", "right side", "right hand side"], # Added "right hand side"

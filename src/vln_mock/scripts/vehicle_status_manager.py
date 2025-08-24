@@ -121,7 +121,8 @@ class VehicleStatusManager:
         """Handle pointcloud updates for emergency stop detection"""
         self.navigation_ready = True  # Assume navigation is ready if we get pointclouds
 
-        if self.current_velocity.linear.x <= 0.1:  # Only check for obstacles when moving forward
+        # Only check for obstacles if the robot has some translational velocity
+        if abs(self.current_velocity.linear.x) < 0.1 and abs(self.current_velocity.linear.y) < 0.1:
             if self.emergency_stop_active:
                 rospy.loginfo("Emergency Stop Released: Robot is not moving forward.")
                 self.emergency_stop_active = False

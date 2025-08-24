@@ -195,7 +195,8 @@ class CoreNode:
         rospy.loginfo("Scan and plan phase complete. Notified state machine.")
 
     def odometry_callback(self, msg):
-        """Update the robot's current yaw from odometry data."""
+        """Update the robot's current yaw and pose from odometry data."""
+        self.current_pose = msg.pose.pose
         orientation_q = msg.pose.pose.orientation
         euler = tfs.euler_from_quaternion([
             orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w
@@ -261,9 +262,7 @@ class CoreNode:
         # Store latest image for VLM queries
         self.latest_image = msg
 
-    def odometry_callback(self, msg):
-        """Handle odometry updates"""
-        self.current_pose = msg.pose.pose
+
 
     def compute_value_map(self):
         """Compute value map based on current subtask and occupancy grid"""
