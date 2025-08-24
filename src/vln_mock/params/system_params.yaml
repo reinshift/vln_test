@@ -1,0 +1,255 @@
+# Enhanced VLN System Parameters
+# Optimized configuration for competition performance
+
+# === Core System Settings ===
+system:
+  performance_mode: "competition"  # options: debug, testing, competition
+  optimization_enabled: true
+  use_gpu: true
+  log_level: "info"  # options: debug, info, warn, error
+  
+# === Path Planning Parameters ===
+path_planning:
+  algorithm: "astar"  # options: astar, rrt_star, hybrid
+  grid_resolution: 0.1  # meters
+  planning_timeout: 5.0  # seconds
+  max_planning_distance: 50.0  # meters
+  
+  # A* specific parameters
+  astar:
+    heuristic_weight: 1.2
+    allow_diagonal: true
+    max_iterations: 10000
+    
+  # RRT* specific parameters
+  rrt_star:
+    max_iterations: 5000
+    step_size: 0.5
+    goal_tolerance: 0.3
+    rewire_radius: 2.0
+
+# === Task Optimization Parameters ===
+task_optimization:
+  max_iterations: 100
+  convergence_threshold: 0.01
+  
+  # Optimization weights (must sum to 1.0)
+  weights:
+    path_length: 0.4
+    execution_time: 0.3
+    energy_consumption: 0.3
+  
+  # Constraints
+  constraints:
+    max_path_length: 100.0  # meters
+    max_execution_time: 300.0  # seconds
+    min_success_probability: 0.8
+
+# === Control Parameters ===
+control:
+  controller_type: "pid"  # options: pid, mpc, pure_pursuit
+  
+  # PID controller parameters
+  pid:
+    linear:
+      kp: 1.0
+      ki: 0.1
+      kd: 0.05
+      max_output: 1.5
+      min_output: -1.5
+    angular:
+      kp: 2.0
+      ki: 0.2
+      kd: 0.1
+      max_output: 1.0
+      min_output: -1.0
+  
+  # Velocity limits
+  velocity_limits:
+    max_linear: 1.5  # m/s
+    max_angular: 1.0  # rad/s
+    acceleration_limit: 2.0  # m/s^2
+    
+  # Safety parameters
+  safety:
+    min_obstacle_distance: 0.5  # meters
+    emergency_stop_distance: 0.3  # meters
+    max_lateral_error: 1.0  # meters
+
+# === Perception Parameters ===
+perception:
+  # ArUco detection
+  aruco:
+    marker_size: 0.5  # meters
+    detection_threshold: 0.7
+    tracking_timeout: 2.0  # seconds
+    max_detection_distance: 10.0  # meters
+    
+  # Object detection (GroundingDINO)
+  object_detection:
+    confidence_threshold: 0.5
+    nms_threshold: 0.4
+    max_detections: 100
+    detection_frequency: 10.0  # Hz
+    
+  # Point cloud processing
+  pointcloud:
+    grid_resolution: 0.1  # meters
+    grid_width: 200  # cells
+    grid_height: 200  # cells
+    min_obstacle_height: 0.1  # meters
+    max_obstacle_height: 2.0  # meters
+    filter_noise: true
+
+# === Language Processing Parameters ===
+language_processing:
+  # English instruction processing
+  english_processor:
+    model_name: "qwen2.5-vl-7b"
+    optimization_enabled: true
+    competition_mode: true
+    confidence_threshold: 0.8
+    
+  # Instruction parsing
+  parsing:
+    timeout: 10.0  # seconds
+    retry_attempts: 3
+    fallback_strategy: "simplified"
+    
+  # Spatial reasoning
+  spatial_reasoning:
+    distance_threshold: 2.0  # meters
+    direction_tolerance: 30.0  # degrees
+    landmark_confidence: 0.6
+
+# === Multi-Marker Management ===
+marker_management:
+  timeout: 30.0  # seconds
+  confidence_threshold: 0.7
+  spatial_tolerance: 2.0  # meters
+  max_history_size: 10
+  
+  # Marker selection criteria
+  selection:
+    distance_weight: 0.3
+    confidence_weight: 0.4
+    stability_weight: 0.3
+    spatial_context_weight: 0.2
+
+# === Performance Monitoring ===
+performance:
+  monitor_frequency: 10.0  # Hz
+  log_performance: true
+  performance_log_path: "/tmp/vln_performance.log"
+  
+  # SPL calculation
+  spl:
+    path_length_weight: 0.5
+    success_weight: 0.5
+    distance_threshold: 1.0  # meters for success
+    
+  # Metrics tracking
+  metrics:
+    track_path_efficiency: true
+    track_execution_time: true
+    track_success_rate: true
+    track_computational_load: true
+
+# === Simulation Parameters ===
+simulation:
+  use_simulation: false
+  simulation_speed: 1.0
+  
+  # Mock data generation
+  mock_data:
+    aruco_frequency: 5.0  # Hz
+    object_frequency: 2.0  # Hz
+    noise_level: 0.1
+
+# === Hardware Configuration ===
+hardware:
+  # Camera settings
+  camera:
+    width: 640
+    height: 480
+    fps: 30
+    focal_length: 525.0
+    
+  # LiDAR settings
+  lidar:
+    range_min: 0.1  # meters
+    range_max: 30.0  # meters
+    angle_min: -3.14159  # radians
+    angle_max: 3.14159  # radians
+    
+  # IMU settings
+  imu:
+    frequency: 100.0  # Hz
+    noise_variance: 0.01
+
+# === Safety and Fault Tolerance ===
+safety:
+  # Emergency stops
+  emergency_stop:
+    enabled: true
+    obstacle_distance: 0.3  # meters
+    timeout: 1.0  # seconds
+    
+  # Fault detection
+  fault_detection:
+    sensor_timeout: 5.0  # seconds
+    communication_timeout: 2.0  # seconds
+    max_error_rate: 0.1
+    
+  # Recovery behaviors
+  recovery:
+    retry_planning: true
+    max_retry_attempts: 3
+    fallback_to_manual: false
+
+# === Communication and Topics ===
+topics:
+  # Input topics
+  camera_image: "/camera/color/image_raw"
+  camera_info: "/camera/color/camera_info"
+  pointcloud: "/velodyne_points"
+  odometry: "/magv/odometry/gt"
+  instruction: "/instruction"
+  
+  # Output topics
+  cmd_vel: "/magv/cmd_vel"
+  vehicle_status: "/magv/vehicle_status"
+  detected_objects: "/detected_objects"
+  aruco_info: "/aruco_info"
+  optimal_path: "/optimal_path"
+  performance_metrics: "/performance_metrics"
+
+# === Debug and Development ===
+debug:
+  enable_visualization: false
+  save_debug_images: false
+  debug_image_path: "/tmp/vln_debug/"
+  verbose_logging: false
+  
+  # Profiling
+  profiling:
+    enabled: false
+    output_path: "/tmp/vln_profile.txt"
+    sample_frequency: 1.0  # Hz
+
+# === Competition Specific Settings ===
+competition:
+  # Time limits
+  max_episode_time: 300.0  # seconds
+  planning_time_limit: 10.0  # seconds
+  
+  # Performance targets
+  target_spl: 0.8
+  target_success_rate: 0.9
+  target_path_efficiency: 0.85
+  
+  # Optimization priorities
+  priorities:
+    speed: 0.4
+    accuracy: 0.6
+    robustness: 0.3

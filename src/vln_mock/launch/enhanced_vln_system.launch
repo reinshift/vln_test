@@ -1,0 +1,182 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- Enhanced VLN System Launch with C++ Performance Optimization -->
+    
+    <!-- Arguments -->
+    <arg name="use_gpu" default="true"/>
+    <arg name="performance_mode" default="competition"/>
+    <arg name="enable_optimization" default="true"/>
+    <arg name="log_level" default="info"/>
+    
+    <!-- Parameter Server Configuration -->
+    <rosparam command="load" file="$(find vln_mock)/params/system_params.yaml"/>
+    
+    <!-- 1. Core Message Servers -->
+    
+    <!-- ArUco Detection Node -->
+    <node name="aruco_node" pkg="aruco_detector" type="aruco_node.py" output="screen">
+        <param name="camera_topic" value="/camera/color/image_raw"/>
+        <param name="camera_info_topic" value="/camera/color/camera_info"/>
+        <param name="marker_size" value="0.5"/>
+        <param name="detection_threshold" value="0.7"/>
+        <remap from="/aruco_info" to="/aruco_info"/>
+    </node>
+    
+    <!-- Enhanced Grounding DINO Detection -->
+    <node name="grounding_dino_node" pkg="llm_model" type="grounding_dino_node.py" output="screen">
+        <param name="use_gpu" value="$(arg use_gpu)"/>
+        <param name="confidence_threshold" value="0.5"/>
+        <param name="model_path" value="$(find llm_model)/models/groundingdino_swint_ogc.pth"/>
+        <param name="config_path" value="$(find llm_model)/configs/GroundingDINO_SwinT_OGC.py"/>
+        <remap from="/detected_objects" to="/detected_objects"/>
+    </node>
+    
+    <!-- 2. C++ Performance-Critical Components -->
+    
+    <!-- Optimal Path Planner (C++) -->
+    <node name="optimal_planner_node" pkg="optimal_planner" type="optimal_planner_node" output="screen">
+        <param name="algorithm" value="astar"/>
+        <param name="grid_resolution" value="0.1"/>
+        <param name="planning_timeout" value="5.0"/>
+        <param name="optimization_enabled" value="$(arg enable_optimization)"/>
+        <remap from="/goal" to="/move_base_simple/goal"/>
+        <remap from="/optimal_path" to="/optimal_path"/>
+        <remap from="/occupancy_grid" to="/map"/>
+    </node>
+    
+    <!-- Task Optimizer (C++) -->
+    <node name="task_optimizer_node" pkg="optimal_planner" type="task_optimizer_node" output="screen">
+        <param name="max_iterations" value="100"/>
+        <param name="convergence_threshold" value="0.01"/>
+        <param name="optimization_weight_path" value="0.4"/>
+        <param name="optimization_weight_time" value="0.3"/>
+        <param name="optimization_weight_energy" value="0.3"/>
+        <remap from="/task_sequence" to="/task_sequence"/>
+        <remap from="/optimization_result" to="/task_optimization"/>
+    </node>
+    
+    <!-- Performance Monitor (C++) -->
+    <node name="performance_monitor_node" pkg="optimal_planner" type="performance_monitor_node" output="screen">
+        <param name="monitor_frequency" value="10.0"/>
+        <param name="log_performance" value="true"/>
+        <param name="performance_log_path" value="/tmp/vln_performance.log"/>
+        <remap from="/performance_metrics" to="/performance_metrics"/>
+        <remap from="/system_status" to="/system_status"/>
+    </node>
+    
+    <!-- Point Cloud to Grid Converter -->
+    <node name="pointcloud_to_grid_node" pkg="pointcloud_to_grid" type="pointcloud_to_grid_node" output="screen">
+        <param name="grid_resolution" value="0.1"/>
+        <param name="grid_width" value="200"/>
+        <param name="grid_height" value="200"/>
+        <param name="min_obstacle_height" value="0.1"/>
+        <param name="max_obstacle_height" value="2.0"/>
+        <remap from="/velodyne_points" to="/velodyne_points"/>
+        <remap from="/occupancy_grid" to="/map"/>
+    </node>
+    
+    <!-- 3. Enhanced Python Components -->
+    
+    <!-- Enhanced Core Node with Performance Optimization -->
+    <node name="core_node" pkg="vln_mock" type="core_node.py" output="screen">
+        <param name="performance_mode" value="$(arg performance_mode)"/>
+        <param name="optimization_enabled" value="$(arg enable_optimization)"/>
+        <param name="use_enhanced_planning" value="true"/>
+        <remap from="/instruction" to="/instruction"/>
+        <remap from="/vehicle_status" to="/magv/vehicle_status"/>
+        <remap from="/optimal_path" to="/optimal_path"/>
+        <remap from="/task_optimization" to="/task_optimization"/>
+    </node>
+    
+    <!-- Advanced Controller with C++ Integration -->
+    <node name="controller" pkg="vln_mock" type="controller.py" output="screen">
+        <param name="use_optimal_planner" value="true"/>
+        <param name="pid_kp" value="1.0"/>
+        <param name="pid_ki" value="0.1"/>
+        <param name="pid_kd" value="0.05"/>
+        <param name="max_linear_velocity" value="1.5"/>
+        <param name="max_angular_velocity" value="1.0"/>
+        <remap from="/cmd_vel" to="/magv/cmd_vel"/>
+        <remap from="/optimal_path" to="/optimal_path"/>
+        <remap from="/odometry" to="/magv/odometry/gt"/>
+    </node>
+    
+    <!-- Vehicle Status Manager with Performance Monitoring -->
+    <node name="vehicle_status_manager" pkg="vln_mock" type="vehicle_status_manager.py" output="screen">
+        <param name="status_frequency" value="20.0"/>
+        <param name="performance_tracking" value="true"/>
+        <remap from="/vehicle_status" to="/magv/vehicle_status"/>
+        <remap from="/performance_metrics" to="/performance_metrics"/>
+    </node>
+    
+    <!-- Enhanced English Instruction Processor -->
+    <node name="english_instruction_processor" pkg="llm_model" type="english_instruction_processor.py" output="screen">
+        <param name="model_name" value="qwen2.5-vl-7b"/>
+        <param name="optimization_enabled" value="true"/>
+        <param name="competition_mode" value="true"/>
+        <remap from="/raw_instruction" to="/raw_instruction"/>
+        <remap from="/processed_instruction" to="/instruction"/>
+        <remap from="/instruction_analysis" to="/instruction_analysis"/>
+    </node>
+    
+    <!-- Multi-Marker Manager -->
+    <node name="marker_manager" pkg="vln_mock" type="marker_manager.py" output="screen">
+        <param name="marker_timeout" value="30.0"/>
+        <param name="confidence_threshold" value="0.7"/>
+        <param name="spatial_tolerance" value="2.0"/>
+        <remap from="/aruco_info" to="/aruco_info"/>
+        <remap from="/detected_objects" to="/detected_objects"/>
+        <remap from="/target_marker" to="/target_marker"/>
+        <remap from="/marker_guidance" to="/marker_guidance"/>
+    </node>
+    
+    <!-- 4. Simulation Components (when needed) -->
+    
+    <!-- Ground DINO Simulator for testing -->
+    <node name="ground_dino_simulator" pkg="vln_mock" type="ground_dino_simulator.py" output="screen" unless="$(arg use_gpu)">
+        <param name="simulation_mode" value="true"/>
+        <remap from="/detected_objects" to="/detected_objects"/>
+    </node>
+    
+    <!-- 5. Logging and Monitoring -->
+    
+    <!-- ROS Bag Recording for Performance Analysis -->
+    <node name="performance_recorder" pkg="rosbag" type="record" 
+          args="-o /tmp/vln_performance 
+                /performance_metrics 
+                /optimal_path 
+                /task_optimization 
+                /magv/vehicle_status 
+                /instruction 
+                /target_marker"
+          if="$(eval arg('log_level') == 'debug')"/>
+    
+    <!-- Dynamic Reconfigure for Runtime Parameter Adjustment -->
+    <node name="rqt_reconfigure" pkg="rqt_reconfigure" type="rqt_reconfigure" 
+          if="$(eval arg('performance_mode') == 'debug')"/>
+    
+    <!-- 6. TF and Coordinate Frame Management -->
+    
+    <!-- Static TF Publishers -->
+    <node name="static_tf_publisher_base" pkg="tf2_ros" type="static_transform_publisher"
+          args="0 0 0 0 0 0 1 map base_link"/>
+    
+    <node name="static_tf_publisher_camera" pkg="tf2_ros" type="static_transform_publisher"
+          args="0.3 0 0.2 0 0 0 1 base_link camera_link"/>
+    
+    <node name="static_tf_publisher_lidar" pkg="tf2_ros" type="static_transform_publisher"
+          args="0 0 0.3 0 0 0 1 base_link velodyne"/>
+    
+    <!-- 7. Visualization and Debug Tools -->
+    
+    <!-- RViz for visualization -->
+    <node name="rviz" pkg="rviz" type="rviz" 
+          args="-d $(find vln_mock)/rviz/vln_system.rviz"
+          if="$(eval arg('performance_mode') == 'debug')"/>
+    
+    <!-- Performance Dashboard -->
+    <node name="performance_dashboard" pkg="rqt_plot" type="rqt_plot"
+          args="/performance_metrics/spl /performance_metrics/path_efficiency /performance_metrics/success_rate"
+          if="$(eval arg('performance_mode') == 'competition')"/>
+
+</launch>

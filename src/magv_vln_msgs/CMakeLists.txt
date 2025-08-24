@@ -23,6 +23,9 @@ add_message_files(
       BoundingBox2D.msg
       Detection2D.msg
       Detection2DArray.msg
+      OptimalPath.msg
+      TaskOptimization.msg
+      PerformanceMetrics.msg
 )
 
 generate_messages(
