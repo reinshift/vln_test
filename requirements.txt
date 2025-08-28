@@ -16,6 +16,9 @@ accelerate>=0.25.0
 ultralytics
 Pillow>=9.0.0
 
+opencv-contrib-python>=4.5
+groundingdino-py
+
 # Numerical computing
 numpy>=1.21.0
 

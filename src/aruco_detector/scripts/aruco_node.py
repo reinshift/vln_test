@@ -19,7 +19,6 @@ from aruco_detector.msg import ArucoInfo, ArucoMarker
 class ArucoDetectorNode:
     def __init__(self):
         rospy.loginfo("ArUco Detector Node Initializing...")
-        rospy.loginfo("ArUco Detector Node Initializing...")
 
         # --- Parameters ---
         self.marker_size = rospy.get_param('~marker_size', 0.1)  # ArUco码的物理边长 (米)
@@ -65,7 +64,8 @@ class ArucoDetectorNode:
         self.bridge = CvBridge()
 
         # --- ROS Subscribers & Publishers ---
-        self.image_sub = rospy.Subscriber('/magv/camera/image_compressed', CompressedImage, self.image_callback, queue_size=1)
+        # Subscribe to the correct compressed image topic from rosbag
+        self.image_sub = rospy.Subscriber('/magv/camera/image_compressed/compressed', CompressedImage, self.image_callback, queue_size=1)
         self.odom_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
         self.aruco_pub = rospy.Publisher('/aruco_info', ArucoInfo, queue_size=10)
 

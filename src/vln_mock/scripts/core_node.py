@@ -62,7 +62,8 @@ class CoreNode:
         self.vln_status_sub = rospy.Subscriber('/vln_status', VehicleStatus, self.vln_status_callback, queue_size=1)
         self.occupancy_grid_sub = rospy.Subscriber('/occupancy_grid', OccupancyGrid, self.occupancy_grid_callback, queue_size=1)
         self.aruco_info_sub = rospy.Subscriber('/aruco_info', ArucoInfo, self.aruco_info_callback, queue_size=1)
-        self.image_sub = rospy.Subscriber('/magv/camera/image_compressed', CompressedImage, self.image_callback, queue_size=1)
+        # Subscribe to the correct compressed image topic from rosbag
+        self.image_sub = rospy.Subscriber('/magv/camera/image_compressed/compressed', CompressedImage, self.image_callback, queue_size=1)
         self.vlm_response_sub = rospy.Subscriber('/vlm_response', String, self.vlm_response_callback, queue_size=1)
         self.odometry_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
         self.dino_detections_sub = rospy.Subscriber('/grounding_dino/detections', Detection2DArray, self.dino_detections_callback, queue_size=1)
@@ -383,53 +384,7 @@ class CoreNode:
             angle += 2 * math.pi
         return angle
 
-        # Transform cell coordinates relative to the robot's current position and orientation
-        robot_x = self.current_pose.position.x if self.current_pose else 0
-        robot_y = self.current_pose.position.y if self.current_pose else 0
 
-        # Vector from robot to cell in world frame
-        dx_world = x - robot_x
-        dy_world = y - robot_y
-
-        # Rotate into robot's local frame
-        cos_yaw = math.cos(-current_yaw)
-        sin_yaw = math.sin(-current_yaw)
-        local_x = dx_world * cos_yaw - dy_world * sin_yaw
-        local_y = dx_world * sin_yaw + dy_world * cos_yaw
-
-        # Direction-based value (prefer cells in the desired direction in the robot's frame)
-        if direction == 'forward':
-            base_value += local_x * 10.0  # Prefer positive x (forward) in robot frame
-        elif direction == 'backward':
-            base_value -= local_x * 10.0  # Prefer negative x (backward) in robot frame
-        elif direction == 'left':
-            base_value += local_y * 10.0  # Prefer positive y (left) in robot frame
-        elif direction == 'right':
-            base_value -= local_y * 10.0  # Prefer negative y (right) in robot frame
-
-        # Goal-based value (if a specific goal is mentioned)
-        if goal and goal in self.detected_objects:
-            # Find the closest detected object matching the goal
-            closest_dist_sq = float('inf')
-            closest_pos = None
-            for obj_pos in self.detected_objects[goal]:
-                dist_sq = (x - obj_pos.x)**2 + (y - obj_pos.y)**2
-                if dist_sq < closest_dist_sq:
-                    closest_dist_sq = dist_sq
-                    closest_pos = obj_pos
-
-            # If a matching object is found, create a strong attraction field around it
-            if closest_pos is not None:
-                distance = math.sqrt(closest_dist_sq)
-                # Use a Gaussian-like function to create a strong peak at the object's location
-                attraction_strength = 1000.0
-                attraction_variance = 2.0  # meters
-                base_value += attraction_strength * math.exp(-distance**2 / (2 * attraction_variance**2))
-
-        # Add some randomness to avoid local minima
-        base_value += np.random.normal(0, 1.0)
-
-        return base_value
 
     def generate_path_points(self):
         """Generate path points based on value map"""

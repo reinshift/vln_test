@@ -6,11 +6,10 @@ import re
 import json
 import rospy
 from std_msgs.msg import String as StringMsg, Bool
-from sensor_msgs.msg import Image
-import torch
-from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-from cv_bridge import CvBridge
+from sensor_msgs.msg import Image, CompressedImage
 from PIL import Image as PILImage
+import cv2
+import numpy as np
 
 class InstructionProcessorNode:
     def __init__(self):
@@ -18,16 +17,16 @@ class InstructionProcessorNode:
         self.sub = rospy.Subscriber("/instruction", StringMsg, self._on_instruction, queue_size=1)
         self.vlm_query_sub = rospy.Subscriber("/vlm_query", StringMsg, self._on_vlm_query, queue_size=1)
         self.status_pub = rospy.Publisher("/VLM_Status", Bool, queue_size=1)
-        self.task_pub = rospy.Publisher("/subtasks", StringMsg, queue_size=1)
+        self.task_pub = rospy.Publisher("/subtasks", StringMsg, queue_size=1, latch=True)
         self.vlm_response_pub = rospy.Publisher("/vlm_response", StringMsg, queue_size=1)
-        self.image_sub = rospy.Subscriber("/camera/image_raw", Image, self._on_image, queue_size=1)
+        # Subscribe to compressed image topic from rosbag
+        self.image_sub = rospy.Subscriber("/magv/camera/image_compressed/compressed", CompressedImage, self._on_image, queue_size=1)
 
         # Model components
         self._model = None
         self._processor = None
         self.model_loaded = False
-        self.bridge = CvBridge()
-        self.latest_image = None
+        self.latest_cv_image = None
 
         # Load model at startup
         rospy.loginfo("Loading VLM model at startup...")
@@ -47,26 +46,35 @@ class InstructionProcessorNode:
         """Publish model status"""
         self.status_pub.publish(Bool(data=self.model_loaded))
 
-    def _on_image(self, msg: Image):
-        """Store the latest image"""
-        self.latest_image = msg
+    def _on_image(self, msg: CompressedImage):
+        """Decode and store the latest image (from CompressedImage)"""
+        try:
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if cv_image is None:
+                rospy.logwarn("Failed to decode compressed image: None result")
+                return
+            self.latest_cv_image = cv_image
+        except Exception as e:
+            rospy.logerr(f"Failed to decode compressed image: {e}")
 
     def _on_instruction(self, msg: StringMsg):
-        """Process incoming instruction"""
-        if not self.model_loaded:
-            rospy.logerr("Model not loaded, skipping instruction")
-            return
-
+        """Process incoming instruction. Always attempt fallback parsing even if model is not loaded."""
         instruction = (msg.data or "").strip()
-        rospy.loginfo("Processing: %s", instruction)
+        rospy.loginfo("Received instruction: %s", instruction)
 
-        try:
-            subtasks = self._process_with_llm(instruction)
-        except Exception as e:
-            rospy.logerr("LLM processing failed: %s", e)
+        subtasks = None
+        if self.model_loaded:
+            try:
+                subtasks = self._process_with_llm(instruction)
+            except Exception as e:
+                rospy.logerr("LLM processing failed: %s", e)
+
+        if not subtasks:
+            rospy.logwarn("Using fallback parser for instruction (model_loaded=%s)", self.model_loaded)
             subtasks = self._fallback_parse(instruction)
 
-        # Publish subtasks to new topic
+        # Publish subtasks to new topic (latched)
         task_msg = StringMsg(data=json.dumps(subtasks))
         self.task_pub.publish(task_msg)
         rospy.loginfo("Published subtasks: %s", json.dumps(subtasks, indent=2))
@@ -95,7 +103,13 @@ class InstructionProcessorNode:
             rospy.logerr("VLM query processing failed: %s", e)
 
     def _load_model(self):
-        """Load model from local directory"""
+        """Load model from local directory. Import heavy deps lazily so node can run without them."""
+        try:
+            import torch
+            from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        except Exception as e:
+            raise RuntimeError("ML dependencies not available: {}".format(e))
+
         default_model_path = os.path.join(os.path.dirname(__file__), "..", "models", "Qwen2.5-VL-7B-Instruct")
         model_dir = rospy.get_param("~model_path", default_model_path)
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -113,6 +127,7 @@ class InstructionProcessorNode:
 
     def _process_with_llm(self, instruction: str):
         """Process instruction with VL model"""
+        import torch
         # Improved prompt with examples
         examples = [
             {"input": "move forward to the tree, turn right, go straight and stop at the traffic cone",
@@ -226,10 +241,11 @@ class InstructionProcessorNode:
 
     def _process_vlm_query(self, query_data):
         """Process VLM query about ArUco markers and target objects"""
+        import torch
         query = query_data.get("query", "")
         aruco_markers = query_data.get("aruco_markers", [])
 
-        if self.latest_image is None:
+        if self.latest_cv_image is None:
             rospy.logwarn("No image received, cannot process VLM query")
             return {"error": "No image available"}
 
@@ -238,10 +254,10 @@ class InstructionProcessorNode:
         prompt += f'Consider the detected ArUco markers at these locations: {json.dumps(aruco_markers)}. '
         prompt += 'Is the target object visible near any of these markers? Respond in JSON format with fields: "target_found" (boolean), "confidence" (float), and "target_description" (string).'
 
-        # Convert ROS Image to something the model can use (e.g., PIL Image)
+        # Convert OpenCV BGR image to PIL RGB image
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(self.latest_image, desired_encoding="rgb8")
-            pil_image = PILImage.fromarray(cv_image)
+            rgb_image = cv2.cvtColor(self.latest_cv_image, cv2.COLOR_BGR2RGB)
+            pil_image = PILImage.fromarray(rgb_image)
         except Exception as e:
             rospy.logerr(f"Failed to convert image: {e}")
             return {"error": "Image conversion failed"}

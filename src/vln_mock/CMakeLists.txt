@@ -31,3 +31,22 @@ add_definitions(${PCL_DEFINITIONS})
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Python scripts are installed automatically by catkin
+
+catkin_install_python(PROGRAMS
+  scripts/core_node.py
+  scripts/controller.py
+  scripts/vehicle_status_manager.py
+  scripts/ground_dino_simulator.py
+  scripts/test_image_publisher.py
+  scripts/test_instruction_publisher.py
+  scripts/test_occupancy_grid_publisher.py
+  scripts/test_odom_publisher.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+
+
+# Install launch files
+install(DIRECTORY launch
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
