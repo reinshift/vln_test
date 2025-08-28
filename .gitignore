@@ -1,6 +1,7 @@
 build/
 devel/
 .catkin_workspace
+.vscode
 venv310
 
 **/*.png

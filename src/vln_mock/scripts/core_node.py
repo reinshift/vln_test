@@ -104,7 +104,11 @@ class CoreNode:
                     self.current_subtask_index = msg.current_subtask_index
                     if 0 <= self.current_subtask_index < len(self.current_subtasks):
                         self.current_subtask = self.current_subtasks[self.current_subtask_index]
+                        # Reset scan and plan state for new subtask
+                        self.scan_and_plan_complete = False
+                        self.directional_detections = {}  # Clear previous detections
                     rospy.loginfo(f"Received subtasks: {len(self.current_subtasks)} tasks, current index: {self.current_subtask_index}")
+                    rospy.loginfo(f"Current subtask: {self.current_subtask}")
                 except json.JSONDecodeError as e:
                     rospy.logerr(f"Failed to parse subtasks JSON: {e}")
                     return
@@ -135,10 +139,22 @@ class CoreNode:
             return
 
         rospy.loginfo("Starting scan and plan phase...")
+        rospy.loginfo(f"Current subtasks: {self.current_subtasks}")
+        rospy.loginfo(f"Current subtask index: {self.current_subtask_index}")
+        rospy.loginfo(f"Current subtask: {self.current_subtask}")
 
         if not self.current_subtask:
-            rospy.logwarn("No current subtask available for initialization.")
-            return
+            rospy.logerr("No current subtask available for initialization!")
+            rospy.logerr(f"Subtasks list: {self.current_subtasks}")
+            rospy.logerr(f"Subtask index: {self.current_subtask_index}")
+            # Try to proceed with a default subtask to avoid getting stuck
+            if self.current_subtasks and len(self.current_subtasks) > 0:
+                rospy.logwarn("Attempting to use first available subtask...")
+                self.current_subtask = self.current_subtasks[0]
+                self.current_subtask_index = 0
+            else:
+                rospy.logerr("No subtasks available at all! Cannot proceed.")
+                return
 
         # 1. Publish the goal object as a prompt for GroundingDINO
         goal = self.current_subtask.get('goal', None)

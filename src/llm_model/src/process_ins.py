@@ -19,6 +19,8 @@ class InstructionProcessorNode:
         self.status_pub = rospy.Publisher("/VLM_Status", Bool, queue_size=1)
         self.task_pub = rospy.Publisher("/subtasks", StringMsg, queue_size=1, latch=True)
         self.vlm_response_pub = rospy.Publisher("/vlm_response", StringMsg, queue_size=1)
+        # 详细错误日志发布器
+        self.error_log_pub = rospy.Publisher("/vlm_error_log", StringMsg, queue_size=10)
         # Subscribe to compressed image topic from rosbag
         self.image_sub = rospy.Subscriber("/magv/camera/image_compressed/compressed", CompressedImage, self._on_image, queue_size=1)
 
@@ -30,12 +32,15 @@ class InstructionProcessorNode:
 
         # Load model at startup
         rospy.loginfo("Loading VLM model at startup...")
+        self._log_error("INFO", "VLM model loading started")
         try:
             self._load_model()
             self.model_loaded = True
             rospy.loginfo("VLM model loaded successfully!")
+            self._log_error("SUCCESS", "VLM model loaded successfully")
         except Exception as e:
             rospy.logerr("Failed to load VLM model: %s", e)
+            self._log_error("ERROR", f"VLM model loading failed: {str(e)}")
             self.model_loaded = False
 
         # Start status publisher timer
@@ -102,28 +107,56 @@ class InstructionProcessorNode:
         except Exception as e:
             rospy.logerr("VLM query processing failed: %s", e)
 
+    def _log_error(self, level, message):
+        """发布详细错误日志到话题"""
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        log_msg = f"[{timestamp}] [{level}] VLM_MODEL: {message}"
+        self.error_log_pub.publish(StringMsg(data=log_msg))
+
     def _load_model(self):
         """Load model from local directory. Import heavy deps lazily so node can run without them."""
         try:
+            self._log_error("INFO", "Importing ML dependencies...")
             import torch
             from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+            self._log_error("INFO", "ML dependencies imported successfully")
         except Exception as e:
+            self._log_error("ERROR", f"ML dependencies import failed: {str(e)}")
             raise RuntimeError("ML dependencies not available: {}".format(e))
 
         default_model_path = os.path.join(os.path.dirname(__file__), "..", "models", "Qwen2.5-VL-7B-Instruct")
         model_dir = rospy.get_param("~model_path", default_model_path)
+        self._log_error("INFO", f"Model path: {model_dir}")
+        
+        # 检查模型文件是否存在
+        if not os.path.exists(model_dir):
+            self._log_error("ERROR", f"Model directory not found: {model_dir}")
+            raise RuntimeError(f"Model directory not found: {model_dir}")
+        
         device = "cuda" if torch.cuda.is_available() else "cpu"
         torch_dtype = torch.float16 if device == "cuda" else torch.float32
+        self._log_error("INFO", f"Using device: {device}, dtype: {torch_dtype}")
 
-        # Load processor and model
-        self._processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
-        self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_dir,
-            torch_dtype=torch_dtype,
-            device_map="auto" if torch.cuda.is_available() else None
-        )
-        self._model.to(device)
-        self._model.eval()
+        try:
+            # Load processor and model
+            self._log_error("INFO", "Loading processor...")
+            self._processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
+            self._log_error("INFO", "Processor loaded successfully")
+            
+            self._log_error("INFO", "Loading model...")
+            self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_dir,
+                torch_dtype=torch_dtype,
+                device_map="auto" if torch.cuda.is_available() else None
+            )
+            self._log_error("INFO", "Model loaded, moving to device...")
+            self._model.to(device)
+            self._model.eval()
+            self._log_error("INFO", "Model setup completed")
+        except Exception as e:
+            self._log_error("ERROR", f"Model loading step failed: {str(e)}")
+            raise
 
     def _process_with_llm(self, instruction: str):
         """Process instruction with VL model"""
