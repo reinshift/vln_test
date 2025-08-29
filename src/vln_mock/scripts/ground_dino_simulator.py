@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/catkin_ws/venv310/bin/python3
 # -*- coding: utf-8 -*-
 
 import rospy
