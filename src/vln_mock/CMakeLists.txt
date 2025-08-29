@@ -37,10 +37,6 @@ catkin_install_python(PROGRAMS
   scripts/controller.py
   scripts/vehicle_status_manager.py
   scripts/ground_dino_simulator.py
-  scripts/test_image_publisher.py
-  scripts/test_instruction_publisher.py
-  scripts/test_occupancy_grid_publisher.py
-  scripts/test_odom_publisher.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
