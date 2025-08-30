@@ -15,6 +15,7 @@ from magv_vln_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray
 
 # GroundingDINO imports
 from groundingdino.util.inference import load_model, load_image, predict, annotate
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
 class GroundingDinoNode:
     def __init__(self):
@@ -22,7 +23,9 @@ class GroundingDinoNode:
         rospy.loginfo("Initializing GroundingDINO Node...")
 
         # --- Parameters ---
-        self.model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'GroundingDino', 'grounding-dino-base')
+        # 允许通过 ~model_path 覆盖模型路径，默认指向包内 models/GroundingDino/grounding-dino-base
+        default_model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'GroundingDino', 'grounding-dino-base')
+        self.model_path = rospy.get_param('~model_path', default_model_path)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.box_threshold = rospy.get_param('~box_threshold', 0.35)
         self.text_threshold = rospy.get_param('~text_threshold', 0.25)
@@ -45,9 +48,17 @@ class GroundingDinoNode:
 
     def load_dino_model(self):
         try:
-            # This is where the actual model loading would happen.
-            self.model = load_model(self.model_path, self.device)
-            rospy.loginfo(f"GroundingDINO model loaded successfully on {self.device}")
+            # 使用 HuggingFace Transformers 风格加载（本地目录或模型ID均可）
+            resolved_path = os.path.abspath(self.model_path) if os.path.exists(self.model_path) else self.model_path
+            rospy.loginfo(f"Loading HF Grounding DINO from: {resolved_path}")
+
+            # 加载处理器与模型
+            self.processor = AutoProcessor.from_pretrained(resolved_path)
+            hf_model = AutoModelForZeroShotObjectDetection.from_pretrained(resolved_path)
+            self.model = hf_model.to(self.device)
+            self.is_hf_model = True
+
+            rospy.loginfo(f"HF Grounding DINO loaded successfully on {self.device}")
         except Exception as e:
             rospy.logerr(f"Failed to load GroundingDINO model: {e}")
             self.model = None
@@ -75,14 +86,58 @@ class GroundingDinoNode:
 
         # --- Perform Inference ---
         try:
-            boxes, logits, phrases = predict(
-                model=self.model,
-                image=image_rgb,
-                caption=self.current_prompt,
-                box_threshold=self.box_threshold,
-                text_threshold=self.text_threshold,
-                device=self.device
-            )
+            if hasattr(self, 'is_hf_model') and getattr(self, 'is_hf_model'):
+                # HF 推理分支
+                prompt = self.current_prompt.strip().lower()
+                if prompt and not prompt.endswith('.'):  # HF要求以句号结尾
+                    prompt += '.'
+
+                inputs = self.processor(images=image_rgb, text=prompt, return_tensors="pt")
+                inputs = {k: (v.to(self.device) if hasattr(v, 'to') else v) for k, v in inputs.items()}
+
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+
+                target_sizes = torch.tensor([(image_rgb.shape[0], image_rgb.shape[1])], device=self.device)
+                results = self.processor.post_process_grounded_object_detection(
+                    outputs,
+                    inputs.get('input_ids'),
+                    box_threshold=self.box_threshold,
+                    text_threshold=self.text_threshold,
+                    target_sizes=target_sizes
+                )[0]
+
+                boxes_xyxy = results.get('boxes')  # shape [N,4] xyxy in absolute pixels
+                scores = results.get('scores')     # shape [N]
+                labels = results.get('labels', []) # list[str]
+
+                if boxes_xyxy is None or scores is None:
+                    return
+
+                # 转为与原始代码兼容的归一化 cx,cy,w,h 与 phrases/logits
+                h_img, w_img = image_rgb.shape[0], image_rgb.shape[1]
+                boxes_list = []
+                for b in boxes_xyxy:
+                    x1, y1, x2, y2 = b.tolist()
+                    cx = (x1 + x2) / 2.0 / w_img
+                    cy = (y1 + y2) / 2.0 / h_img
+                    bw = (x2 - x1) / w_img
+                    bh = (y2 - y1) / h_img
+                    boxes_list.append(torch.tensor([cx, cy, bw, bh], dtype=torch.float32))
+
+                boxes = boxes_list
+                logits = scores
+                phrases = labels if isinstance(labels, list) else []
+            else:
+                # 旧 GroundingDINO 推理分支
+                boxes, logits, phrases = predict(
+                    model=self.model,
+                    image=image_rgb,
+                    caption=self.current_prompt,
+                    box_threshold=self.box_threshold,
+                    text_threshold=self.text_threshold,
+                    device=self.device
+                )
         except Exception as e:
             rospy.logerr(f"Inference failed: {e}")
             return
@@ -127,4 +182,3 @@ if __name__ == '__main__':
         rospy.spin()
     except rospy.ROSInterruptException:
         pass
-

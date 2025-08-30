@@ -22,7 +22,7 @@
     </node>
 
     <!-- ArUco Detector Node -->
-    <node name="aruco_detector_node" pkg="aruco_detector" type="aruco_node.py" output="screen">
+    <node name="aruco_detector_node" pkg="aruco_detector" type="aruco_node.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
@@ -40,7 +40,7 @@
     </node>
 
     <!-- 第2层：VLM模型节点 (延迟启动，避免资源竞争) -->
-    <node name="instruction_processor" pkg="llm_model" type="process_ins.py" output="screen" launch-prefix="bash -c 'sleep 3; $0 $@'">
+    <node name="instruction_processor" pkg="llm_model" type="process_ins.py" output="screen" launch-prefix="bash -c 'sleep 3; exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
@@ -49,17 +49,20 @@
     </node>
 
     <!-- 第3层：GroundingDINO (在VLM之后启动) -->
-    <node name="grounding_dino_node" pkg="llm_model" type="grounding_dino_node.py" output="screen" launch-prefix="bash -c 'sleep 6; $0 $@'">
+    <node name="grounding_dino_node" pkg="llm_model" type="grounding_dino_node.py" output="screen"
+        launch-prefix="bash -c 'sleep 6; exec /catkin_ws/venv310/bin/python3 $(find llm_model)/src/grounding_dino_node.py $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
         <env name="PYTHONHOME" value="" />
+        <param name="config_path" value="/catkin_ws/src/llm_model/models/GroundingDino/weights/GroundingDINO_SwinT_OGC.py"/>
+        <param name="ckpt_path" value="/catkin_ws/src/llm_model/models/GroundingDino/weights/groundingdino_swint_ogc.pth"/>
         <param name="box_threshold" value="0.35"/>
         <param name="text_threshold" value="0.25"/>
     </node>
 
     <!-- 第4层：状态管理和控制节点 -->
-    <node name="vehicle_status_manager" pkg="vln_mock" type="vehicle_status_manager.py" output="screen" launch-prefix="bash -c 'sleep 1; $0 $@'">
+    <node name="vehicle_status_manager" pkg="vln_mock" type="vehicle_status_manager.py" output="screen" launch-prefix="bash -c 'sleep 1; exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
@@ -68,7 +71,7 @@
     </node>
 
     <!-- Controller Node -->
-    <node name="controller" pkg="vln_mock" type="controller.py" output="screen" launch-prefix="bash -c 'sleep 2; $0 $@'">
+    <node name="controller" pkg="vln_mock" type="controller.py" output="screen" launch-prefix="bash -c 'sleep 2; exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
@@ -88,7 +91,7 @@
     </node>
 
     <!-- 第5层：核心决策节点 (最后启动，依赖所有其他节点) -->
-    <node name="core_node" pkg="vln_mock" type="core_node.py" output="screen" launch-prefix="bash -c 'sleep 8; $0 $@'">
+    <node name="core_node" pkg="vln_mock" type="core_node.py" output="screen" launch-prefix="bash -c 'sleep 8; exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
