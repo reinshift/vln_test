@@ -37,6 +37,7 @@ catkin_install_python(PROGRAMS
   scripts/controller.py
   scripts/vehicle_status_manager.py
   scripts/ground_dino_simulator.py
+  scripts/instruction_latch_bridge.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
