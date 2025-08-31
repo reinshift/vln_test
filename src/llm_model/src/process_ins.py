@@ -20,6 +20,9 @@ class InstructionProcessorNode:
         self.vlm_response_pub = rospy.Publisher("/vlm_response", StringMsg, queue_size=1)
         # 详细错误日志发布器
         self.error_log_pub = rospy.Publisher("/vlm_error_log", StringMsg, queue_size=10)
+        # 订阅外部的 VLM 状态（用于在收到指令后最多等待一段时间再解析）
+        self.vlm_status_true = False
+        self.vlm_status_sub = rospy.Subscriber("/VLM_Status", Bool, self._on_vlm_status, queue_size=1)
         # Subscribe to compressed image topic from rosbag
         self.image_sub = rospy.Subscriber("/magv/camera/image_compressed/compressed", CompressedImage, self._on_image, queue_size=1)
 
@@ -44,6 +47,31 @@ class InstructionProcessorNode:
         
         rospy.loginfo("Instruction processor ready. Model loading scheduled.")
 
+    def _on_vlm_status(self, msg: Bool):
+        """跟踪外部 VLM 状态，便于在收到指令时等待模型准备好。"""
+        try:
+            self.vlm_status_true = bool(getattr(msg, 'data', False))
+        except Exception:
+            self.vlm_status_true = False
+
+    def _wait_for_vlm_ready(self, timeout_sec: float = 15.0):
+        """在处理指令前等待 VLM 就绪，优先使用自身加载状态，也兼容外部状态话题。
+        最长等待 timeout_sec 秒；若已就绪则立即返回。"""
+        if self.model_loaded or self.vlm_status_true or timeout_sec <= 0:
+            return
+        start = rospy.Time.now()
+        rate = rospy.Rate(20)
+        while not rospy.is_shutdown():
+            if self.model_loaded or self.vlm_status_true:
+                break
+            elapsed = (rospy.Time.now() - start).to_sec()
+            if elapsed >= timeout_sec:
+                break
+            try:
+                rate.sleep()
+            except rospy.ROSInterruptException:
+                break
+
     def _publish_status(self, event):
         """Publish model status"""
         self.status_pub.publish(Bool(data=self.model_loaded))
@@ -66,16 +94,38 @@ class InstructionProcessorNode:
         instruction = (msg.data or "").strip()
         rospy.loginfo("Received instruction: %s", instruction)
 
+        # 在解析前，最多等待 10 秒，看看 VLM 是否就绪
+        self._wait_for_vlm_ready(timeout_sec=10.0)
+
         subtasks = None
+        source = "fallback"
         if self.model_loaded:
             try:
                 subtasks = self._process_with_llm(instruction)
+                if subtasks:
+                    source = "llm"
             except Exception as e:
                 rospy.logerr("LLM processing failed: %s", e)
 
         if not subtasks:
             rospy.logwarn("Using fallback parser for instruction (model_loaded=%s)", self.model_loaded)
             subtasks = self._fallback_parse(instruction)
+            source = "fallback"
+
+        # 规范化为列表
+        if isinstance(subtasks, dict):
+            subtasks = [subtasks]
+        if not isinstance(subtasks, list):
+            subtasks = []
+
+        # 为每个子任务添加溯源标记，不改变现有结构
+        annotated = []
+        for it in subtasks:
+            if isinstance(it, dict):
+                it = dict(it)
+                it.setdefault("source", source)
+                annotated.append(it)
+        subtasks = annotated
 
         # Publish subtasks to new topic (latched)
         task_msg = StringMsg(data=json.dumps(subtasks))
