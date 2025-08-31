@@ -36,8 +36,12 @@ class Controller:
         self.orientation_kd = rospy.get_param('~orientation_kd', 0.1)
         self.orientation_ki = rospy.get_param('~orientation_ki', 0.0)
         self.orientation_kd = rospy.get_param('~orientation_kd', 0.1)
-        self.max_linear_vel = rospy.get_param('~max_linear_vel', 1.0)
-        self.max_angular_vel = rospy.get_param('~max_angular_vel', 1.0)
+        # Velocity and acceleration limits
+        # Defaults set to: v <= 1.5 m/s, w <= 6.28 rad/s; a <= 3 m/s^2, alpha <= 6.28 rad/s^2
+        self.max_linear_vel = rospy.get_param('~max_linear_vel', 1.5)
+        self.max_angular_vel = rospy.get_param('~max_angular_vel', 6.28)
+        self.max_linear_accel = rospy.get_param('~max_linear_accel', 3.0)
+        self.max_angular_accel = rospy.get_param('~max_angular_accel', 6.28)
         self.position_tolerance = rospy.get_param('~position_tolerance', 0.1)
         self.orientation_tolerance = rospy.get_param('~orientation_tolerance', 0.1)
 
@@ -64,6 +68,10 @@ class Controller:
         self.control_timer = rospy.Timer(rospy.Duration(0.05), self.control_loop)  # 20Hz control loop
 
         rospy.loginfo("Controller initialized")
+
+        # Track last published command for acceleration limiting
+        from geometry_msgs.msg import Twist as _Twist
+        self.last_cmd_vel = _Twist()
 
     def odometry_callback(self, msg):
         """Handle odometry updates"""
@@ -239,13 +247,41 @@ class Controller:
                                self.orientation_ki * self.orientation_error_integral +
                                self.orientation_kd * orientation_error_derivative)
 
-            # Apply velocity limits
+            # Apply velocity limits (caps)
             cmd_vel.linear.x = max(-self.max_linear_vel, min(self.max_linear_vel, cmd_vel.linear.x))
             cmd_vel.linear.y = max(-self.max_linear_vel, min(self.max_linear_vel, cmd_vel.linear.y))
             cmd_vel.angular.z = max(-self.max_angular_vel, min(self.max_angular_vel, cmd_vel.angular.z))
 
+            # Apply acceleration limits (rate limiting per control step)
+            # Compute dt from timer event for accurate rate limiting
+            try:
+                dt = (event.current_real - event.last_real).to_sec()
+                if dt <= 0:
+                    dt = 0.05
+            except Exception:
+                dt = 0.05
+
+            max_dv = self.max_linear_accel * dt
+            max_dw = self.max_angular_accel * dt
+
+            # Limit change relative to last published command
+            def clamp_delta(current, last, max_delta):
+                delta = current - last
+                if delta > max_delta:
+                    return last + max_delta
+                if delta < -max_delta:
+                    return last - max_delta
+                return current
+
+            cmd_vel.linear.x = clamp_delta(cmd_vel.linear.x, self.last_cmd_vel.linear.x, max_dv)
+            cmd_vel.linear.y = clamp_delta(cmd_vel.linear.y, self.last_cmd_vel.linear.y, max_dv)
+            cmd_vel.angular.z = clamp_delta(cmd_vel.angular.z, self.last_cmd_vel.angular.z, max_dw)
+
             # Publish command
             self.cmd_vel_pub.publish(cmd_vel)
+
+            # Save for next iteration's acceleration limiting
+            self.last_cmd_vel = cmd_vel
 
             # Update previous errors
             self.position_error_prev = pos_error

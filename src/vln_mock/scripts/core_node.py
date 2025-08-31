@@ -52,7 +52,9 @@ class CoreNode:
         self.value_map_pub = rospy.Publisher('/value_map', ValueMap, queue_size=1)
         self.path_point_pub = rospy.Publisher('/path_point', PathPoint, queue_size=10)
         self.controller_discrete_pub = rospy.Publisher('/world_goal', PositionCommand, queue_size=10)
+        # Prefer sending velocity goals to the controller so it can enforce limits
         self.controller_continuous_pub = rospy.Publisher('/magv/omni_drive_controller/cmd_vel', Twist, queue_size=10)
+        self.controller_velocity_pub = rospy.Publisher('/velocity_goal', Twist, queue_size=10)
         self.status_feedback_pub = rospy.Publisher('/core_feedback', String, queue_size=10)
         self.vlm_query_pub = rospy.Publisher('/vlm_query', String, queue_size=10)
         self.final_status_pub = rospy.Publisher('/status', Int32, queue_size=10)
@@ -74,6 +76,10 @@ class CoreNode:
         self.path_planning_distance = rospy.get_param('~path_planning_distance', 2.0)  # meters
         self.goal_tolerance = rospy.get_param('~goal_tolerance', 0.5)  # meters
         self.aruco_detection_threshold = rospy.get_param('~aruco_detection_threshold', 0.3)  # meters
+        # Use same default caps as controller for consistency
+        self.max_angular_vel = rospy.get_param('~max_angular_vel', 6.28)
+        # Scan duration (seconds)
+        self.scan_duration_sec = rospy.get_param('~scan_duration_sec', 3.0)
 
         # Camera parameters for projecting detections
         self.image_width = rospy.get_param('~image_width', 1080)
@@ -169,12 +175,18 @@ class CoreNode:
         # 2. Command the robot to perform a 360-degree scan
         rospy.loginfo("Commanding 360-degree rotation for scanning...")
         scan_cmd = Twist()
-        scan_cmd.angular.z = 0.5  # rad/s
-        self.controller_continuous_pub.publish(scan_cmd)
+        # Rotate at max allowable angular speed; controller will enforce acceleration limits
+        scan_cmd.angular.z = self.max_angular_vel
+        # Send via velocity_goal so Controller applies limits
+        try:
+            self.controller_velocity_pub.publish(scan_cmd)
+        except Exception:
+            # Fallback to direct cmd_vel if velocity_goal unavailable
+            self.controller_continuous_pub.publish(scan_cmd)
 
         # 3. Use a timer to stop the scan and trigger planning
-        # A 360-degree turn at 0.5 rad/s takes about 12.6 seconds. Give it 13 seconds.
-        rospy.Timer(rospy.Duration(13.0), self.finish_scan_and_plan, oneshot=True)
+        # Fixed scan duration (configurable); rotate at max angular speed
+        rospy.Timer(rospy.Duration(self.scan_duration_sec), self.finish_scan_and_plan, oneshot=True)
 
     def finish_scan_and_plan(self, event):
         """
@@ -185,7 +197,10 @@ class CoreNode:
 
         # 1. Stop the robot's rotation
         stop_cmd = Twist()
-        self.controller_continuous_pub.publish(stop_cmd)
+        try:
+            self.controller_velocity_pub.publish(stop_cmd)
+        except Exception:
+            self.controller_continuous_pub.publish(stop_cmd)
 
         # Clear the GroundingDINO prompt
         self.dino_prompt_pub.publish(String(data=""))
