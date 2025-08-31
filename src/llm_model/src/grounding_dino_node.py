@@ -13,8 +13,13 @@ from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 from magv_vln_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray
 
-# GroundingDINO imports
-from groundingdino.util.inference import load_model, load_image, predict, annotate
+# GroundingDINO imports（原生库改为可选）
+try:
+    from groundingdino.util.inference import predict  # 仅在可用时用于旧分支
+    HAS_GDINO_NATIVE = True
+except Exception:
+    HAS_GDINO_NATIVE = False
+
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
 class GroundingDinoNode:
@@ -130,14 +135,18 @@ class GroundingDinoNode:
                 phrases = labels if isinstance(labels, list) else []
             else:
                 # 旧 GroundingDINO 推理分支
-                boxes, logits, phrases = predict(
-                    model=self.model,
-                    image=image_rgb,
-                    caption=self.current_prompt,
-                    box_threshold=self.box_threshold,
-                    text_threshold=self.text_threshold,
-                    device=self.device
-                )
+                if HAS_GDINO_NATIVE:
+                    boxes, logits, phrases = predict(
+                        model=self.model,
+                        image=image_rgb,
+                        caption=self.current_prompt,
+                        box_threshold=self.box_threshold,
+                        text_threshold=self.text_threshold,
+                        device=self.device
+                    )
+                else:
+                    rospy.logerr("GroundingDINO native inference not available and HF model not loaded; skipping.")
+                    return
         except Exception as e:
             rospy.logerr(f"Inference failed: {e}")
             return
