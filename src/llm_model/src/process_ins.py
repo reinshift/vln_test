@@ -33,6 +33,9 @@ class InstructionProcessorNode:
         self.last_error_message = None  # 记录最近一次模型加载错误
         self.latest_cv_image = None
 
+        # Parameters
+        self.vlm_ready_timeout = rospy.get_param('~vlm_ready_timeout', 15.0)
+
         # Start status publisher timer FIRST
         self.status_timer = rospy.Timer(rospy.Duration(2.0), self._publish_status)
         
@@ -94,8 +97,14 @@ class InstructionProcessorNode:
         instruction = (msg.data or "").strip()
         rospy.loginfo("Received instruction: %s", instruction)
 
-        # 在解析前，最多等待 10 秒，看看 VLM 是否就绪
-        self._wait_for_vlm_ready(timeout_sec=10.0)
+        # 在解析前等待 VLM 就绪（可配置），并打印更明确的日志
+        wait_t = max(0.0, float(self.vlm_ready_timeout))
+        if wait_t > 0:
+            rospy.loginfo(f"Waiting up to {wait_t:.1f}s for VLM to be ready (model_loaded={self.model_loaded}, external_status={self.vlm_status_true})")
+        t0 = rospy.Time.now()
+        self._wait_for_vlm_ready(timeout_sec=wait_t)
+        waited = (rospy.Time.now() - t0).to_sec()
+        rospy.loginfo(f"VLM wait finished after {waited:.2f}s (model_loaded={self.model_loaded}, external_status={self.vlm_status_true})")
 
         subtasks = None
         source = "fallback"
@@ -498,13 +507,13 @@ class InstructionProcessorNode:
 
     def _fallback_parse(self, instruction: str):
         """Fallback heuristic parser"""
-        # 方向关键字优先级：先匹配更具体/否定性的，再匹配泛化的forward，避免“go backward”被“go”误判为forward
+        # 方向关键字优先级：先匹配更具体/否定性的，再匹配泛化的forward
         dir_map = {
             "backward": ["turn back", "backward", "turn around", "back"],
             "left": ["turn left", "left side", "left"],
             "right": ["turn right", "right hand side", "right side", "right"],
-            # forward 不再包含过度泛化的 "go"/"move"，以减少歧义
-            "forward": ["forward", "straight", "ahead", "move until"],
+            # forward 不包含过度泛化的 "go"/"move"，以减少歧义
+            "forward": ["forward", "straight", "ahead", "move until", "go straight"],
         }
 
         # Find direction-target pairs
@@ -529,21 +538,36 @@ class InstructionProcessorNode:
             # Identify target
             current_target = None
             if current_direction:
-                # A simple way to extract a target is to remove keywords and see what's left
+                # Remove direction keywords and common verbs to avoid leftover like "move"
                 temp_section = section
                 for keyword in dir_map[current_direction]:
-                    temp_section = temp_section.replace(keyword, "")
-                current_target = temp_section.strip(" .")
+                    temp_section = temp_section.replace(keyword, " ")
+                # also strip generic verbs/connectors
+                temp_section = re.sub(r"\b(move|go|head|to|towards|until|reach|the|a|an|near|at)\b", " ", temp_section)
+                temp_section = re.sub(r"\s+", " ", temp_section)
+                temp_section = temp_section.strip(" .")
+                current_target = temp_section if temp_section else None
 
+            # Pattern: "go/move to <target>" when no explicit direction
+            if not current_direction and not current_target:
+                m = re.search(r"\b(go|move|head)\s+(to|towards)\s+(.+)$", section)
+                if m:
+                    current_direction = "forward"
+                    raw_target = m.group(3)
+                    raw_target = re.sub(r"\b(the|a|an)\b", " ", raw_target)
+                    current_target = raw_target.strip(" .") or None
+
+            
+            if current_direction:
                 pairs.append({
                     f"subtask_{subtask_counter}": current_direction,
                     "goal": current_target if current_target else None
                 })
                 subtask_counter += 1
 
+        # 最后防御：若没有解析出任何对，返回更中性的占位而非含糊词
         return pairs if pairs else [
-            {"subtask_1": "forward", "goal": "destination"},
-            {"subtask_2": "stop", "goal": None}
+            {"subtask_1": "forward", "goal": None}
         ]
 
     def _process_vlm_query(self, query_data):

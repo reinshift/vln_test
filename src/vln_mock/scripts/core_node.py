@@ -42,6 +42,12 @@ class CoreNode:
         self.navigation_active = False
         self.scan_and_plan_complete = False
         self.task_completed = False
+        self.scan_in_progress = False
+        self.scan_start_time = None
+        self.scan_start_yaw = 0.0
+        self.scan_last_yaw = 0.0
+        self.scan_accum_angle = 0.0
+        self.scan_ctrl_timer = None
         self.current_yaw = 0.0
         self.current_pose = None
 
@@ -80,6 +86,12 @@ class CoreNode:
         self.max_angular_vel = rospy.get_param('~max_angular_vel', 6.28)
         # Scan duration (seconds)
         self.scan_duration_sec = rospy.get_param('~scan_duration_sec', 3.0)
+        # Scan yaw alignment tolerance (radians)
+        self.scan_yaw_tolerance = rospy.get_param('~scan_yaw_tolerance', 0.05)
+        # Progress controller gain to match 2π within duration
+        self.scan_progress_kp = rospy.get_param('~scan_progress_kp', 2.0)
+        # Safety timeout factor: stop if scan exceeds duration * factor
+        self.scan_timeout_factor = rospy.get_param('~scan_timeout_factor', 1.7)
 
         # Camera parameters for projecting detections
         self.image_width = rospy.get_param('~image_width', 1080)
@@ -172,21 +184,32 @@ class CoreNode:
         else:
             rospy.loginfo("No specific goal in subtask, will rely on directional guidance.")
 
-        # 2. Command the robot to perform a 360-degree scan
+        # 2. Command the robot to perform a 360-degree scan (only once per subtask)
+        if self.scan_in_progress:
+            rospy.logdebug("Scan already in progress; skip re-triggering rotation.")
+            return
+        self.scan_in_progress = True
+
         rospy.loginfo("Commanding 360-degree rotation for scanning...")
         scan_cmd = Twist()
-        # Rotate at max allowable angular speed; controller will enforce acceleration limits
         scan_cmd.angular.z = self.max_angular_vel
-        # Send via velocity_goal so Controller applies limits
         try:
             self.controller_velocity_pub.publish(scan_cmd)
         except Exception:
-            # Fallback to direct cmd_vel if velocity_goal unavailable
             self.controller_continuous_pub.publish(scan_cmd)
 
-        # 3. Use a timer to stop the scan and trigger planning
-        # Fixed scan duration (configurable); rotate at max angular speed
-        rospy.Timer(rospy.Duration(self.scan_duration_sec), self.finish_scan_and_plan, oneshot=True)
+        # 3. Start closed-loop scan control to complete 2π within duration and realign yaw
+        self.scan_start_time = rospy.Time.now()
+        self.scan_start_yaw = self.current_yaw
+        self.scan_last_yaw = self.current_yaw
+        self.scan_accum_angle = 0.0
+        # Create/update control timer (50 Hz)
+        if self.scan_ctrl_timer is not None:
+            try:
+                self.scan_ctrl_timer.shutdown()
+            except Exception:
+                pass
+        self.scan_ctrl_timer = rospy.Timer(rospy.Duration(0.02), self.scan_control_loop)
 
     def finish_scan_and_plan(self, event):
         """
@@ -194,6 +217,15 @@ class CoreNode:
         Stops the robot, computes the map, generates a path, and notifies the state machine.
         """
         rospy.loginfo("Rotation finished. Stopping robot and starting planning.")
+        # Mark scan phase ended
+        self.scan_in_progress = False
+        # Stop scan control timer if running
+        if self.scan_ctrl_timer is not None:
+            try:
+                self.scan_ctrl_timer.shutdown()
+            except Exception:
+                pass
+            self.scan_ctrl_timer = None
 
         # 1. Stop the robot's rotation
         stop_cmd = Twist()
@@ -206,10 +238,84 @@ class CoreNode:
         self.dino_prompt_pub.publish(String(data=""))
 
         if self.occupancy_grid is None:
-            rospy.logerr("Cannot plan without an occupancy grid!")
-            # Optionally, you could add logic here to notify the state machine of a failure.
+            rospy.logwarn("Occupancy grid not available yet; will retry planning shortly without re-rotating.")
+            rospy.Timer(rospy.Duration(1.0), self.try_plan_after_grid, oneshot=True)
             return
 
+        # Proceed to planning now that grid is available
+        self._do_plan_and_notify()
+
+    def scan_control_loop(self, event):
+        """Closed-loop control to achieve 2π rotation within scan_duration_sec and realign to start yaw."""
+        if not self.scan_in_progress:
+            return
+        now = rospy.Time.now()
+        elapsed = (now - self.scan_start_time).to_sec() if self.scan_start_time else 0.0
+
+        # Safety timeout
+        if elapsed > self.scan_duration_sec * self.scan_timeout_factor:
+            rospy.logwarn("Scan exceeded safety timeout, forcing stop and planning.")
+            self.finish_scan_and_plan(None)
+            return
+
+        # Update current yaw and accumulated angle
+        current_yaw = self.current_yaw
+        dyaw = self.normalize_angle(current_yaw - self.scan_last_yaw)
+        self.scan_accum_angle += abs(dyaw)
+        self.scan_last_yaw = current_yaw
+
+        two_pi = 2.0 * math.pi
+        # Desired progress over time
+        desired_progress = max(0.0, min(two_pi, two_pi * (elapsed / max(1e-3, self.scan_duration_sec))))
+        progress_error = desired_progress - self.scan_accum_angle
+
+        cmd = Twist()
+
+        if elapsed < self.scan_duration_sec:
+            # Feedforward + proportional on progress to match schedule
+            omega_ff = two_pi / max(1e-3, self.scan_duration_sec)
+            omega_cmd = omega_ff + self.scan_progress_kp * progress_error
+            # Clamp
+            omega_cmd = max(-self.max_angular_vel, min(self.max_angular_vel, omega_cmd))
+            # Ensure positive rotation direction (counter-clockwise), but allow correction to stay on schedule
+            if omega_cmd < 0.2:
+                omega_cmd = 0.2
+            cmd.angular.z = omega_cmd
+            try:
+                self.controller_velocity_pub.publish(cmd)
+            except Exception:
+                self.controller_continuous_pub.publish(cmd)
+            return
+        else:
+            # Alignment phase: bring yaw back to start yaw within tolerance
+            yaw_err = self.normalize_angle(self.scan_start_yaw - current_yaw)
+            if abs(yaw_err) <= self.scan_yaw_tolerance:
+                self.finish_scan_and_plan(None)
+                return
+            # Proportional correction with clamp and minimum speed
+            omega_c = self.scan_progress_kp * yaw_err
+            max_omega = min(self.max_angular_vel, 1.5)  # limit during alignment
+            min_omega = 0.15
+            if omega_c >= 0:
+                omega_c = max(min_omega, min(max_omega, omega_c))
+            else:
+                omega_c = -max(min_omega, min(max_omega, -omega_c))
+            cmd.angular.z = omega_c
+            try:
+                self.controller_velocity_pub.publish(cmd)
+            except Exception:
+                self.controller_continuous_pub.publish(cmd)
+
+    def try_plan_after_grid(self, event):
+        """Retry planning until occupancy grid arrives; do not restart rotation."""
+        if self.occupancy_grid is None:
+            rospy.logwarn_throttle(5.0, "Waiting for occupancy grid to plan...")
+            rospy.Timer(rospy.Duration(1.0), self.try_plan_after_grid, oneshot=True)
+            return
+        self._do_plan_and_notify()
+
+    def _do_plan_and_notify(self):
+        """Compute value map, generate path, mark complete, and notify state machine."""
         # 2. Compute the value map using the data gathered during the scan
         self.compute_value_map()
 
