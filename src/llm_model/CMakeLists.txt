@@ -158,7 +158,8 @@ include_directories(
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
-  src/process_ins.py
+  src/vlm_loader.py
+  src/ins_processor.py
   src/grounding_dino_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

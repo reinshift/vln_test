@@ -53,19 +53,32 @@
         <param name="max_history_size" value="10"/>
     </node>
 
-    <!-- 第2层：VLM模型节点 (延迟启动，避免资源竞争) -->
-    <node name="instruction_processor" pkg="llm_model" type="process_ins.py" output="screen" launch-prefix="bash -c 'sleep 3; exec /catkin_ws/venv310/bin/python3 $0 $@'">
+    <!-- 第2层：VLM加载节点与指令处理协作节点 -->
+    <node name="vlm_loader" pkg="llm_model" type="vlm_loader.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
         <env name="PYTHONHOME" value="" />
+        <!-- 模型路径与生成参数 -->
         <param name="model_path" value="$(find llm_model)/models/Qwen2.5-VL-7B-Instruct"/>
-        <!-- Wait up to N seconds for VLM ready before fallback parsing -->
-        <param name="vlm_ready_timeout" value="15.0"/>
+        <param name="llm_max_new_tokens" value="128"/>
+        <param name="llm_do_sample" value="false"/>
+        <param name="llm_temperature" value="0.7"/>
+    </node>
+
+    <node name="ins_processor" pkg="llm_model" type="ins_processor.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
+        <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
+        <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
+        <env name="PYTHONHOME" value="" />
+        <!-- 等待 VLM 从 False->True 的超时时间（秒） -->
+        <param name="wait_vlm_ready_sec" value="15.0"/>
+        <!-- 可替换系统提示词（包含 few-shot 示例） -->
+        <param name="system_prompt" value="You are a navigation instruction subtask parser. Convert instructions to a JSON array. Each array element is an object with keys: subtask_N (a direction string, one of &quot;forward&quot;, &quot;backward&quot;, &quot;left&quot;, &quot;right&quot;) and goal (a string target or null). Start N from 1 and increment by 1. Respond with JSON only, no extra text.\n\nExamples:\nInstruction: &quot;move forward and stop at the tree&quot;\nOutput: [\n  {&quot;subtask_1&quot;: &quot;forward&quot;, &quot;goal&quot;: &quot;tree&quot;}\n]\n\nInstruction: &quot;head to your right hand side and go to the bench&quot;\nOutput: [\n  {&quot;subtask_1&quot;: &quot;right&quot;, &quot;goal&quot;: null},\n  {&quot;subtask_2&quot;: &quot;forward&quot;, &quot;goal&quot;: &quot;bench&quot;}\n]"/>
     </node>
 
     <!-- 第3层：GroundingDINO (在VLM之后启动) -->
-    <node name="grounding_dino_node" pkg="llm_model" type="grounding_dino_node.py" output="screen" launch-prefix="bash -c 'sleep 6; exec /catkin_ws/venv310/bin/python3 $0 $@'">
+    <node name="grounding_dino_node" pkg="llm_model" type="grounding_dino_node.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
@@ -77,7 +90,7 @@
     </node>
 
     <!-- 第4层：状态管理和控制节点 -->
-    <node name="vehicle_status_manager" pkg="vln_mock" type="vehicle_status_manager.py" output="screen" launch-prefix="bash -c 'sleep 1; exec /catkin_ws/venv310/bin/python3 $0 $@'">
+    <node name="vehicle_status_manager" pkg="vln_mock" type="vehicle_status_manager.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
@@ -86,7 +99,7 @@
     </node>
 
     <!-- Controller Node -->
-    <node name="controller" pkg="vln_mock" type="controller.py" output="screen" launch-prefix="bash -c 'sleep 2; exec /catkin_ws/venv310/bin/python3 $0 $@'">
+    <node name="controller" pkg="vln_mock" type="controller.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
@@ -109,7 +122,7 @@
     </node>
 
     <!-- 第5层：核心决策节点 (最后启动，依赖所有其他节点) -->
-    <node name="core_node" pkg="vln_mock" type="core_node.py" output="screen" launch-prefix="bash -c 'sleep 8; exec /catkin_ws/venv310/bin/python3 $0 $@'">
+    <node name="core_node" pkg="vln_mock" type="core_node.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
         <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
