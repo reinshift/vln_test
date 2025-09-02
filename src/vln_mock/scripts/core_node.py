@@ -50,6 +50,7 @@ class CoreNode:
         self.scan_ctrl_timer = None
         self.current_yaw = 0.0
         self.current_pose = None
+        self.last_odom_time = None
 
         # Thread safety
         self.state_lock = Lock()
@@ -92,6 +93,8 @@ class CoreNode:
         self.scan_progress_kp = rospy.get_param('~scan_progress_kp', 2.0)
         # Safety timeout factor: stop if scan exceeds duration * factor
         self.scan_timeout_factor = rospy.get_param('~scan_timeout_factor', 1.7)
+        # Odometry freshness threshold (seconds)
+        self.odom_stale_threshold = rospy.get_param('~odom_stale_threshold', 0.5)
 
         # Camera parameters for projecting detections
         self.image_width = rospy.get_param('~image_width', 1080)
@@ -258,11 +261,15 @@ class CoreNode:
             self.finish_scan_and_plan(None)
             return
 
+        # Determine odometry freshness; if stale, drive purely by time profile and stop at duration
+        odom_stale = (self.last_odom_time is None) or ((now - self.last_odom_time).to_sec() > self.odom_stale_threshold)
+
         # Update current yaw and accumulated angle
         current_yaw = self.current_yaw
-        dyaw = self.normalize_angle(current_yaw - self.scan_last_yaw)
-        self.scan_accum_angle += abs(dyaw)
-        self.scan_last_yaw = current_yaw
+        if not odom_stale:
+            dyaw = self.normalize_angle(current_yaw - self.scan_last_yaw)
+            self.scan_accum_angle += abs(dyaw)
+            self.scan_last_yaw = current_yaw
 
         two_pi = 2.0 * math.pi
         # Desired progress over time
@@ -274,7 +281,11 @@ class CoreNode:
         if elapsed < self.scan_duration_sec:
             # Feedforward + proportional on progress to match schedule
             omega_ff = two_pi / max(1e-3, self.scan_duration_sec)
-            omega_cmd = omega_ff + self.scan_progress_kp * progress_error
+            if odom_stale:
+                # Without odom, just use feedforward profile
+                omega_cmd = omega_ff
+            else:
+                omega_cmd = omega_ff + self.scan_progress_kp * progress_error
             # Clamp
             omega_cmd = max(-self.max_angular_vel, min(self.max_angular_vel, omega_cmd))
             # Ensure positive rotation direction (counter-clockwise), but allow correction to stay on schedule
@@ -287,6 +298,10 @@ class CoreNode:
                 self.controller_continuous_pub.publish(cmd)
             return
         else:
+            # If no odom, end scan exactly at duration without alignment
+            if odom_stale:
+                self.finish_scan_and_plan(None)
+                return
             # Alignment phase: bring yaw back to start yaw within tolerance
             yaw_err = self.normalize_angle(self.scan_start_yaw - current_yaw)
             if abs(yaw_err) <= self.scan_yaw_tolerance:
@@ -340,6 +355,7 @@ class CoreNode:
             orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w
         ])
         self.current_yaw = euler[2]
+        self.last_odom_time = rospy.Time.now()
 
     def dino_detections_callback(self, msg):
         """
