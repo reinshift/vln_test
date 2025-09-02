@@ -32,6 +32,8 @@
         <param name="cloud_in_topic" value="/magv/scan/3d"/>
         <!-- Use node default for intensity map topic: /lidargrid_i -->
         <!-- <param name="mapi_topic_name" value="/lidargrid_i"/> -->
+        <!-- Align intensity grid with core_node subscription -->
+        <param name="mapi_topic_name" value="/occupancy_grid"/>
         <param name="maph_topic_name" value="/height_grid"/>
     </node>
 
@@ -138,8 +140,7 @@
         <!-- Scan behavior -->
         <param name="max_angular_vel" value="6.28"/>
         <param name="scan_duration_sec" value="5.0"/>
-        <!-- Remap occupancy grid subscription to intensity grid output -->
-        <remap from="/occupancy_grid" to="/lidargrid_i"/>
+        <!-- Occupancy grid is published directly on /occupancy_grid by pointcloud_to_grid_node -->
     </node>
 
     <!-- RViz for visualization (optional) -->
