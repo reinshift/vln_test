@@ -9,6 +9,7 @@
 #include <pointcloud_to_grid/MyParamsConfig.h>
 #include <dynamic_reconfigure/server.h>
 #include <std_msgs/String.h>
+#include <sstream>
 
 // Global variables
 nav_msgs::OccupancyGridPtr intensity_grid(new nav_msgs::OccupancyGrid);
@@ -67,6 +68,21 @@ void paramsCallback(my_dyn_rec::MyParamsConfig &config, uint32_t level)
   grid_map.initGrid(intensity_grid);
   grid_map.initGrid(height_grid);
   grid_map.paramRefresh();
+
+  // Emit a one-shot config message on /grid_debug so rosbag can capture it
+  if (nh_ptr) {
+    std_msgs::String dbg;
+    std::ostringstream oss;
+    oss << "startup grid cfg: frame=" << grid_map.frame_out
+        << " res=" << grid_map.getResolution()
+        << " size=" << grid_map.getSizeX() << "x" << grid_map.getSizeY()
+        << " origin=(" << grid_map.topleft_x << "," << grid_map.bottomright_y << ")"
+        << " cloud_in=" << grid_map.cloud_in_topic
+        << " mapi=" << grid_map.mapi_topic_name
+        << " maph=" << grid_map.maph_topic_name;
+    dbg.data = oss.str();
+    if (pub_debug) pub_debug.publish(dbg);
+  }
 }
 
 
@@ -133,8 +149,13 @@ int main(int argc, char **argv)
   ros::init(argc, argv, "pointcloud_to_grid_node");
   ros::NodeHandle nh;
   nh_ptr = &nh;
-  // Advertise debug topic (String)
-  pub_debug = nh.advertise<std_msgs::String>("/grid_debug", 10);
+  // Advertise debug topic (String) as latched so the last message is delivered to late subscribers/rosbag
+  ros::AdvertiseOptions ao = ros::AdvertiseOptions::create<std_msgs::String>(
+      "/grid_debug", 10,
+      ros::SubscriberStatusCallback(), ros::SubscriberStatusCallback(),
+      ros::VoidConstPtr());
+  ao.latch = true;
+  pub_debug = nh.advertise(ao);
 
   dynamic_reconfigure::Server<my_dyn_rec::MyParamsConfig> server;
   dynamic_reconfigure::Server<my_dyn_rec::MyParamsConfig>::CallbackType f;
