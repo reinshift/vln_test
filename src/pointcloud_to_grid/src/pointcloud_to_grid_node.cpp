@@ -2,6 +2,7 @@
 #include <nav_msgs/OccupancyGrid.h>
 #include <sensor_msgs/PointCloud.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/point_cloud2_iterator.h>
 #include <pcl/PCLPointCloud2.h>
 #include <pcl/conversions.h>
 #include <pcl_ros/point_cloud.h>
@@ -10,6 +11,7 @@
 #include <dynamic_reconfigure/server.h>
 #include <std_msgs/String.h>
 #include <sstream>
+#include <cstdio>
 
 // Global variables
 nav_msgs::OccupancyGridPtr intensity_grid(new nav_msgs::OccupancyGrid);
@@ -65,9 +67,10 @@ void paramsCallback(my_dyn_rec::MyParamsConfig &config, uint32_t level)
     }
   }
 
+  // First compute grid dimensions from parameters, then initialize grids
+  grid_map.paramRefresh();
   grid_map.initGrid(intensity_grid);
   grid_map.initGrid(height_grid);
-  grid_map.paramRefresh();
 
   // Emit a one-shot config message on /grid_debug so rosbag can capture it
   if (nh_ptr) {
@@ -88,34 +91,60 @@ void paramsCallback(my_dyn_rec::MyParamsConfig &config, uint32_t level)
 
 void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
 {
-  pcl::PointCloud<pcl::PointXYZI> out_cloud;
-  // Convert ROS PointCloud2 to PCL point cloud
-  pcl::fromROSMsg(*msg, out_cloud);
+  // Ensure grids have correct size before use
+  const size_t expected = static_cast<size_t>(grid_map.getSize());
+  if (intensity_grid->data.size() != expected || height_grid->data.size() != expected) {
+    try {
+      intensity_grid->data.assign(expected, -1);
+      height_grid->data.assign(expected, -1);
+    } catch (...) {
+      ROS_ERROR("Failed to resize grids, skipping frame");
+      return;
+    }
+  }
+
   // Clear grid data
   std::fill(intensity_grid->data.begin(), intensity_grid->data.end(), -1);
   std::fill(height_grid->data.begin(), height_grid->data.end(), -1);
 
-  for (const auto& out_point : out_cloud)
-  {
-    if (std::fabs(out_point.x) > 0.01) { // Filter out points at origin
-      if (out_point.x > grid_map.topleft_x && out_point.x < grid_map.bottomright_x &&
-          out_point.y > grid_map.bottomright_y && out_point.y < grid_map.topleft_y)
-      {
-        PointXY cell = getIndex(out_point.x, out_point.y);
-        if (cell.x >= 0 && cell.x < grid_map.cell_num_x && cell.y >= 0 && cell.y < grid_map.cell_num_y)
-        {
-          size_t index = cell.y * grid_map.cell_num_x + cell.x;
-
-          // Clamp intensity value to signed char range
-          double intensity_val = out_point.intensity * grid_map.intensity_factor;
-          intensity_grid->data[index] = static_cast<signed char>(std::max(-128.0, std::min(127.0, intensity_val)));
-
-          // Clamp height value to signed char range
-          double height_val = out_point.z * grid_map.height_factor;
-          height_grid->data[index] = static_cast<signed char>(std::max(-128.0, std::min(127.0, height_val)));
-        }
-      }
+  // Iterate PointCloud2 directly to avoid PCL runtime issues
+  try {
+    sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
+    // Intensity may be absent in some datasets; guard accordingly
+    bool has_intensity = false;
+    for (const auto &f : msg->fields) {
+      if (f.name == "intensity") { has_intensity = true; break; }
     }
+    sensor_msgs::PointCloud2ConstIterator<float> iter_i(*msg, has_intensity ? "intensity" : "x");
+
+    for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z, ++iter_i) {
+      const float x = *iter_x;
+      const float y = *iter_y;
+      const float z = *iter_z;
+      const float inten = has_intensity ? *iter_i : 0.0f;
+
+      if (std::fabs(x) <= 0.01f) continue; // filter near-origin
+      if (x <= grid_map.topleft_x || x >= grid_map.bottomright_x) continue;
+      if (y <= grid_map.bottomright_y || y >= grid_map.topleft_y) continue;
+
+      PointXY cell = getIndex(x, y);
+      if (cell.x < 0 || cell.x >= grid_map.cell_num_x || cell.y < 0 || cell.y >= grid_map.cell_num_y) continue;
+
+      const size_t index = static_cast<size_t>(cell.y) * static_cast<size_t>(grid_map.cell_num_x) + static_cast<size_t>(cell.x);
+      if (index >= intensity_grid->data.size()) continue; // extra safety
+
+      // Clamp values to int8 range
+      const double intensity_val = static_cast<double>(inten) * grid_map.intensity_factor;
+      const double height_val = static_cast<double>(z) * grid_map.height_factor;
+      intensity_grid->data[index] = static_cast<signed char>(std::max(-128.0, std::min(127.0, intensity_val)));
+      height_grid->data[index] = static_cast<signed char>(std::max(-128.0, std::min(127.0, height_val)));
+    }
+  } catch (const std::exception &e) {
+    ROS_ERROR("Exception while parsing PointCloud2: %s", e.what());
+  } catch (...) {
+    ROS_ERROR("Unknown error while parsing PointCloud2");
   }
 
   ros::Time now = ros::Time::now();
@@ -125,6 +154,7 @@ void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
   height_grid->info.map_load_time = now;
   pub_igrid.publish(intensity_grid);
   pub_hgrid.publish(height_grid);
+
   // Publish debug summary on /grid_debug to be recorded by rosbag
   try {
     size_t total = static_cast<size_t>(grid_map.getSize());
@@ -135,8 +165,8 @@ void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
     }
     char buf[256];
     std::snprintf(buf, sizeof(buf),
-                  "pc2_points=%zu grid=%dx%d res=%.3f fill_i=%zu/%zu fill_h=%zu/%zu",
-                  out_cloud.size(), grid_map.getSizeX(), grid_map.getSizeY(),
+                  "pc2_points=%u grid=%dx%d res=%.3f fill_i=%zu/%zu fill_h=%zu/%zu",
+                  msg->width * msg->height, grid_map.getSizeX(), grid_map.getSizeY(),
                   grid_map.getResolution(), filled_i, total, filled_h, total);
     std_msgs::String dbg;
     dbg.data = buf;
@@ -150,12 +180,7 @@ int main(int argc, char **argv)
   ros::NodeHandle nh;
   nh_ptr = &nh;
   // Advertise debug topic (String) as latched so the last message is delivered to late subscribers/rosbag
-  ros::AdvertiseOptions ao = ros::AdvertiseOptions::create<std_msgs::String>(
-      "/grid_debug", 10,
-      ros::SubscriberStatusCallback(), ros::SubscriberStatusCallback(),
-      ros::VoidConstPtr());
-  ao.latch = true;
-  pub_debug = nh.advertise(ao);
+  pub_debug = nh.advertise<std_msgs::String>("/grid_debug", 10, true);
 
   dynamic_reconfigure::Server<my_dyn_rec::MyParamsConfig> server;
   dynamic_reconfigure::Server<my_dyn_rec::MyParamsConfig>::CallbackType f;
