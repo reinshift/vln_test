@@ -20,6 +20,7 @@ class InstructionProcessorLite:
     def __init__(self):
         # Params
         self.wait_vlm_ready_sec = float(rospy.get_param('~wait_vlm_ready_sec', 15.0))
+        self.require_vlm_ready = bool(rospy.get_param('~require_vlm_ready', True))
         self.system_prompt = rospy.get_param('~system_prompt', (
             'You are a navigation instruction subtask parser. Convert instructions to a JSON array. '\
             'Each array element is an object with keys: subtask_N (a direction string, one of "forward", "backward", "left", "right") '\
@@ -39,6 +40,8 @@ class InstructionProcessorLite:
         # Active retry fetch config for /instruction
         self.instruction_wait_timeout = float(rospy.get_param('~instruction_wait_timeout', 2.0))  # each wait timeout
         self.instruction_retry_interval = float(rospy.get_param('~instruction_retry_interval', 0.5))  # pause between attempts
+        # Response wait timeout for /vlm_response
+        self.response_timeout_sec = float(rospy.get_param('~vlm_response_timeout_sec', 8.0))
 
         # Pubs/Subs
         self.query_pub = rospy.Publisher('/vlm_query', StringMsg, queue_size=10)
@@ -54,6 +57,11 @@ class InstructionProcessorLite:
         self.pending_request_id = None
         self.pending_instruction = None
         self.pending_sent_time = None
+        self.pending_mode = None  # 'online' | 'offline'
+        self._pending_timer = None  # rospy.Timer
+        # Dedupe recent instruction
+        self.last_instruction = None
+        self.last_instruction_time = 0.0
 
         # Received flag to stop retry worker once we get any instruction
         self._received_instruction_once = False
@@ -71,6 +79,10 @@ class InstructionProcessorLite:
 
     def _on_vlm_status(self, msg: Bool):
         self.vlm_status = bool(getattr(msg, 'data', False))
+        # If model just became ready and we have a pending instruction not yet sent, send it now
+        if self.vlm_status and self.pending_request_id is None and self.pending_instruction:
+            self._log('INFO', 'VLM became ready; sending buffered instruction')
+            self._send_instruction_to_vlm(self.pending_instruction)
 
     def _wait_vlm_transition_true(self, max_wait: float) -> bool:
         """等待 VLM 从 False -> True；若当前已 True 则直接返回 True。"""
@@ -99,11 +111,39 @@ class InstructionProcessorLite:
         self._log('INFO', f'Received instruction: {instruction}')
         self._received_instruction_once = True
 
+        # Simple dedupe within 5 seconds if identical instruction already processed or pending
+        now = time.time()
+        if (self.last_instruction == instruction) and (now - self.last_instruction_time < 5.0):
+            self._log('INFO', 'Duplicate instruction received within 5s window; ignoring')
+            return
+        self.last_instruction = instruction
+        self.last_instruction_time = now
+
         # Wait for VLM ready transition to True (configurable)
         ok = self._wait_vlm_transition_true(self.wait_vlm_ready_sec)
-        if not ok:
-            self._log('WARNING', f'VLM not ready within {self.wait_vlm_ready_sec}s; proceeding to request anyway')
+        if not ok and self.require_vlm_ready:
+            # Fallback: trigger offline parsing via vlm_loader to avoid blocking downstream
+            self._log('WARNING', f'VLM not ready within {self.wait_vlm_ready_sec}s; falling back to offline parsing')
+            request_id = str(uuid.uuid4())
+            payload = {
+                'request_id': request_id,
+                'type': 'instruction_offline',
+                'text': instruction,
+                'need_image': False,
+            }
+            self.pending_request_id = request_id
+            self.pending_instruction = instruction
+            self.pending_sent_time = time.time()
+            self.pending_mode = 'offline'
+            self.query_pub.publish(StringMsg(data=json.dumps(payload)))
+            self._log('INFO', f'Sent offline /vlm_query request_id={request_id}')
+            self._start_response_timer()
+            return
 
+        # Send now (either ready or not required to be ready)
+        self._send_instruction_to_vlm(instruction)
+
+    def _send_instruction_to_vlm(self, instruction: str):
         # Build prompt
         user_text = f'{self.system_prompt}\n\nInstruction: {instruction}'
         request_id = str(uuid.uuid4())
@@ -116,9 +156,10 @@ class InstructionProcessorLite:
         self.pending_request_id = request_id
         self.pending_instruction = instruction
         self.pending_sent_time = time.time()
-
+        self.pending_mode = 'online'
         self.query_pub.publish(StringMsg(data=json.dumps(payload)))
         self._log('INFO', f'Sent /vlm_query request_id={request_id}')
+        self._start_response_timer()
 
     def _instruction_retry_worker(self):
         """Actively wait for /instruction if none received yet. Works with latched publishers and late publishers."""
@@ -152,6 +193,9 @@ class InstructionProcessorLite:
             return
 
         # Prefer structured {'subtasks': [...]}
+        if isinstance(data, dict) and data.get('error'):
+            self._log('WARNING', f"VLM response error: {data.get('error')} (reason={data.get('reason', '')})")
+            return
         subtasks = data.get('subtasks')
         if subtasks is None:
             # Try to extract from text-like fields
@@ -162,15 +206,18 @@ class InstructionProcessorLite:
                 subtasks = self._extract_json(text)
         if not isinstance(subtasks, list):
             subtasks = []
+        if len(subtasks) == 0:
+            # Do not publish empty subtasks; log and clear pending to avoid soft-deadlock
+            self._log('WARNING', 'Empty subtasks parsed; not publishing /subtasks (clearing pending)')
+            self._clear_pending()
+            return
 
         # Publish downstream
         self.subtasks_pub.publish(StringMsg(data=json.dumps(subtasks)))
         self._log('INFO', f'Published subtasks (N={len(subtasks)}) for request_id={rid}')
 
         # Clear pending
-        self.pending_request_id = None
-        self.pending_instruction = None
-        self.pending_sent_time = None
+        self._clear_pending()
 
     def _extract_json(self, text: str):
         m = re.search(r'\[.*\]', text, re.DOTALL)
@@ -180,6 +227,57 @@ class InstructionProcessorLite:
             return json.loads(m.group(0))
         except Exception:
             return []
+
+    def _start_response_timer(self):
+        # cancel existing timer
+        if self._pending_timer is not None:
+            try:
+                self._pending_timer.shutdown()
+            except Exception:
+                pass
+            self._pending_timer = None
+        if self.response_timeout_sec <= 0:
+            return
+        self._pending_timer = rospy.Timer(rospy.Duration(self.response_timeout_sec), self._on_response_timeout, oneshot=True)
+
+    def _on_response_timeout(self, _):
+        # If still pending, handle timeout
+        if not self.pending_request_id:
+            return
+        mode = self.pending_mode or 'online'
+        instr = self.pending_instruction or ''
+        if mode == 'online':
+            # Fallback to offline once
+            self._log('WARNING', f'Response timeout for online request_id={self.pending_request_id}; falling back to offline parsing')
+            request_id = str(uuid.uuid4())
+            payload = {
+                'request_id': request_id,
+                'type': 'instruction_offline',
+                'text': instr,
+                'need_image': False,
+            }
+            self.pending_request_id = request_id
+            self.pending_sent_time = time.time()
+            self.pending_mode = 'offline'
+            self.query_pub.publish(StringMsg(data=json.dumps(payload)))
+            self._log('INFO', f'Sent offline /vlm_query (timeout fallback) request_id={request_id}')
+            self._start_response_timer()
+        else:
+            # Offline also timed out -> log and clear pending
+            self._log('ERROR', f'Response timeout for offline request_id={self.pending_request_id}; giving up and clearing pending')
+            self._clear_pending()
+
+    def _clear_pending(self):
+        self.pending_request_id = None
+        self.pending_instruction = None
+        self.pending_sent_time = None
+        self.pending_mode = None
+        if self._pending_timer is not None:
+            try:
+                self._pending_timer.shutdown()
+            except Exception:
+                pass
+            self._pending_timer = None
 
 
 def main():

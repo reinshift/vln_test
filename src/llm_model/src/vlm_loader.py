@@ -140,12 +140,32 @@ class VLMModelLoaderNode:
         qtype = payload.get('type', 'instruction')
         text = (payload.get('text') or '').strip()
 
-        if not self.model_loaded or self._model is None or self._processor is None:
-            resp = {
-                'request_id': request_id,
-                'error': 'VLM model unavailable',
-                'reason': self.last_error_message or 'not_loaded',
-            }
+        # Backward compatibility: accept legacy payloads sent by core_node.handle_aruco_detection
+        # Legacy shape: {"image_available": bool, "aruco_markers": [...], "query": "..."}
+        # Normalize to vision_query when type is missing and query is present
+        if ('type' not in payload) and ('query' in payload):
+            qtype = 'vision_query'
+            text = str(payload.get('query') or '').strip()
+            need_image = bool(payload.get('image_available', True))
+
+        # Fallback to offline parsing when model is not loaded or explicitly requested
+        if (not self.model_loaded or self._model is None or self._processor is None) and qtype.startswith('instruction'):
+            try:
+                subtasks = self._offline_parse_subtasks(text)
+            except Exception as e:
+                subtasks = []
+                self._log_error('ERROR', f'offline parse failed: {e}')
+            resp = {'request_id': request_id, 'subtasks': subtasks}
+            self.vlm_response_pub.publish(StringMsg(data=json.dumps(resp)))
+            return
+
+        if qtype == 'instruction_offline':
+            try:
+                subtasks = self._offline_parse_subtasks(text)
+            except Exception as e:
+                subtasks = []
+                self._log_error('ERROR', f'offline parse failed: {e}')
+            resp = {'request_id': request_id, 'subtasks': subtasks}
             self.vlm_response_pub.publish(StringMsg(data=json.dumps(resp)))
             return
 
@@ -225,14 +245,7 @@ class VLMModelLoaderNode:
         return {'vision_result': data}
 
     def _build_messages(self, instruction: str):
-        sys_preamble = (
-            'You are a navigation instruction parser. Convert instructions to a JSON array of movement steps. '
-            'Direction options: forward, backward, left, right. '
-            'Goal should be a specific target if mentioned, otherwise null. '
-            'Response must be JSON only, no additional text.'
-        )
-        messages = [{"role": "system", "content": [{"type": "text", "text": sys_preamble}]}]
-        messages.append({"role": "user", "content": [{"type": "text", "text": instruction}]})
+        messages = [{"role": "user", "content": [{"type": "text", "text": instruction}]}]
         return messages
 
     def _extract_json(self, text: str):
@@ -243,6 +256,60 @@ class VLMModelLoaderNode:
             return json.loads(m.group(0))
         except Exception:
             return []
+
+    def _offline_parse_subtasks(self, instruction: str):
+        """
+        启发式离线解析：将自然语言指令解析为规范 JSON 子任务列表。
+        规则：
+        - 方向关键词：forward/backward/left/right（支持常见同义词）
+        - 提取简单目标名词作为 goal（若无则为 null）
+        - 至少返回一个元素；若未命中方向，默认 forward。
+        """
+        text = (instruction or '').strip().lower()
+        if not text:
+            return []
+
+        # 同义词映射（含中英文）
+        dir_map = {
+            'forward': [r'forward', r'ahead', r'straight', r'go on', r'move on', r'向前', r'前进', r'直走', r'直行'],
+            'backward': [r'backward', r'back', r'reverse', r'向后', r'后退'],
+            'left': [r'left', r'to the left', r'leftward', r'向左', r'左转', r'左侧', r'左边'],
+            'right': [r'right', r'to the right', r'rightward', r'向右', r'右转', r'右侧', r'右边'],
+        }
+
+        directions = []
+        for d, pats in dir_map.items():
+            for p in pats:
+                if re.search(rf'\b{p}\b', text):
+                    directions.append(d)
+                    break
+
+        # 简单目标提取：
+        # 英文: "to the <noun>" / "at the <noun>" / "to <noun>"
+        # 中文: "到<名词>" / "去<名词>" / "到<名词>旁边/那里/位置"
+        goal = None
+        m = re.search(r'\bto\s+the\s+([a-z_\- ]{2,})', text)
+        if not m:
+            m = re.search(r'\bat\s+the\s+([a-z_\- ]{2,})', text)
+        if not m:
+            m = re.search(r'\bto\s+([a-z_\- ]{2,})', text)
+        # 中文目标
+        if not m:
+            m = re.search(r'到([\u4e00-\u9fa5a-z0-9_\-]{1,8})(?:那|旁边|那里|位置)?', text)
+        if not m:
+            m = re.search(r'去([\u4e00-\u9fa5a-z0-9_\-]{1,8})(?:那|旁边|那里|位置)?', text)
+        if m:
+            # 取短语首词
+            goal = m.group(1).strip().split(' ')[0]
+
+        # 若没有方向，默认 forward
+        if not directions:
+            directions = ['forward']
+
+        subtasks = []
+        for idx, d in enumerate(directions, start=1):
+            subtasks.append({f'subtask_{idx}': d, 'goal': goal})
+        return subtasks
 
 def main():
     rospy.init_node('vlm_loader', anonymous=False)
