@@ -641,6 +641,10 @@ class CoreNode:
         """Main control loop for navigation"""
         if not self.navigation_active or not self.current_path_points:
             return
+        
+        # Don't execute position control during scanning phase
+        if self.scan_in_progress:
+            return
 
         if self.current_path_index >= len(self.current_path_points):
             # Path completed
