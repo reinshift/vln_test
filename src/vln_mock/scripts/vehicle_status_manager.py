@@ -30,6 +30,9 @@ class VehicleStatusManager:
         self.emergency_stop_active = False
         self.current_velocity = Twist()
         self.emergency_stop_distance = rospy.get_param('~emergency_stop_distance', 0.5) # meters
+        # Height filtering to suppress ground/overhead points
+        self.min_obstacle_z = rospy.get_param('~min_obstacle_z', 0.05)  # meters, ignore very low ground points
+        self.max_obstacle_z = rospy.get_param('~max_obstacle_z', 1.5)   # meters, ignore high overhead points
 
         # Thread safety
         self.state_lock = Lock()
@@ -131,7 +134,13 @@ class VehicleStatusManager:
 
         obstacle_detected = False
         for point in pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True):
-            if 0 < point[0] < self.emergency_stop_distance and abs(point[1]) < 0.4:  # Check a narrow corridor
+            x, y, z = point[0], point[1], point[2]
+            # Forward corridor with height filtering
+            if (
+                0 < x < self.emergency_stop_distance and
+                abs(y) < 0.4 and
+                self.min_obstacle_z <= z <= self.max_obstacle_z
+            ):
                 obstacle_detected = True
                 break
 

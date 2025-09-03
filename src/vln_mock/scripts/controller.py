@@ -34,8 +34,12 @@ class Controller:
         self.orientation_kp = rospy.get_param('~orientation_kp', 2.0)
         self.orientation_ki = rospy.get_param('~orientation_ki', 0.0)
         self.orientation_kd = rospy.get_param('~orientation_kd', 0.1)
-        self.orientation_ki = rospy.get_param('~orientation_ki', 0.0)
-        self.orientation_kd = rospy.get_param('~orientation_kd', 0.1)
+
+        # Alignment strategy: rotate to target yaw before translating (helps camera align with path)
+        self.align_before_translate = rospy.get_param('~align_before_translate', True)
+        self.align_yaw_threshold = rospy.get_param('~align_yaw_threshold', 0.3)  # radians, ~17 deg
+        # Optional: scale linear speed by heading alignment (0..1). Disabled by default
+        self.scale_linear_by_heading = rospy.get_param('~scale_linear_by_heading', False)
         # Velocity and acceleration limits
         # Defaults set to: v <= 1.5 m/s, w <= 6.28 rad/s; a <= 3 m/s^2, alpha <= 6.28 rad/s^2
         self.max_linear_vel = rospy.get_param('~max_linear_vel', 1.5)
@@ -238,6 +242,16 @@ class Controller:
             cmd_vel.linear.x = world_vel_x * cos_yaw + world_vel_y * sin_yaw
             cmd_vel.linear.y = -world_vel_x * sin_yaw + world_vel_y * cos_yaw
 
+            # If required, align yaw before translating: when heading error is large, stop linear motion
+            if self.align_before_translate and abs(orientation_error) > self.align_yaw_threshold:
+                cmd_vel.linear.x = 0.0
+                cmd_vel.linear.y = 0.0
+            elif self.scale_linear_by_heading:
+                # Optionally scale linear speed by cos of heading error to reduce sideways drift
+                scale = max(0.0, math.cos(abs(orientation_error)))
+                cmd_vel.linear.x *= scale
+                cmd_vel.linear.y *= scale
+
             # Orientation PID
             self.orientation_error_integral += orientation_error * dt
             self.orientation_error_integral = max(-self.orientation_integral_clamp, min(self.orientation_integral_clamp, self.orientation_error_integral))
@@ -279,6 +293,10 @@ class Controller:
 
             # Publish command
             self.cmd_vel_pub.publish(cmd_vel)
+
+            # Throttled diagnostics for yaw control
+            rospy.loginfo_throttle(1.0, "yaw_err=%.3f, ang_z=%.3f, lin=(%.3f, %.3f)" % (
+                orientation_error, cmd_vel.angular.z, cmd_vel.linear.x, cmd_vel.linear.y))
 
             # Save for next iteration's acceleration limiting
             self.last_cmd_vel = cmd_vel

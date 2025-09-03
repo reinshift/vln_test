@@ -9,16 +9,13 @@
 #include <pointcloud_to_grid/pointcloud_to_grid_core.hpp>
 #include <pointcloud_to_grid/MyParamsConfig.h>
 #include <dynamic_reconfigure/server.h>
-#include <std_msgs/String.h>
-#include <sstream>
-#include <cstdio>
+ 
 
 // Global variables
 nav_msgs::OccupancyGridPtr intensity_grid(new nav_msgs::OccupancyGrid);
 nav_msgs::OccupancyGridPtr height_grid(new nav_msgs::OccupancyGrid);
 GridMap grid_map;
 ros::Publisher pub_igrid, pub_hgrid;
-ros::Publisher pub_debug;
 ros::Subscriber sub_pc2;
 ros::NodeHandle* nh_ptr = nullptr;
 std::string last_cloud_topic = "";
@@ -69,23 +66,8 @@ void paramsCallback(my_dyn_rec::MyParamsConfig &config, uint32_t level)
 
   // First compute grid dimensions from parameters, then initialize grids
   grid_map.paramRefresh();
-  grid_map.initGrid(intensity_grid);
   grid_map.initGrid(height_grid);
-
-  // Emit a one-shot config message on /grid_debug so rosbag can capture it
-  if (nh_ptr) {
-    std_msgs::String dbg;
-    std::ostringstream oss;
-    oss << "startup grid cfg: frame=" << grid_map.frame_out
-        << " res=" << grid_map.getResolution()
-        << " size=" << grid_map.getSizeX() << "x" << grid_map.getSizeY()
-        << " origin=(" << grid_map.topleft_x << "," << grid_map.bottomright_y << ")"
-        << " cloud_in=" << grid_map.cloud_in_topic
-        << " mapi=" << grid_map.mapi_topic_name
-        << " maph=" << grid_map.maph_topic_name;
-    dbg.data = oss.str();
-    if (pub_debug) pub_debug.publish(dbg);
-  }
+  grid_map.paramRefresh();
 }
 
 
@@ -148,30 +130,11 @@ void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
   }
 
   ros::Time now = ros::Time::now();
-  intensity_grid->header.stamp = now;
   height_grid->header.stamp = now;
   intensity_grid->info.map_load_time = now;
   height_grid->info.map_load_time = now;
   pub_igrid.publish(intensity_grid);
   pub_hgrid.publish(height_grid);
-
-  // Publish debug summary on /grid_debug to be recorded by rosbag
-  try {
-    size_t total = static_cast<size_t>(grid_map.getSize());
-    size_t filled_i = 0, filled_h = 0;
-    for (size_t i = 0; i < intensity_grid->data.size(); ++i) {
-      if (intensity_grid->data[i] != -1) ++filled_i;
-      if (height_grid->data[i] != -1) ++filled_h;
-    }
-    char buf[256];
-    std::snprintf(buf, sizeof(buf),
-                  "pc2_points=%u grid=%dx%d res=%.3f fill_i=%zu/%zu fill_h=%zu/%zu",
-                  msg->width * msg->height, grid_map.getSizeX(), grid_map.getSizeY(),
-                  grid_map.getResolution(), filled_i, total, filled_h, total);
-    std_msgs::String dbg;
-    dbg.data = buf;
-    if (pub_debug) pub_debug.publish(dbg);
-  } catch (...) {}
 }
 
 int main(int argc, char **argv)
@@ -179,8 +142,6 @@ int main(int argc, char **argv)
   ros::init(argc, argv, "pointcloud_to_grid_node");
   ros::NodeHandle nh;
   nh_ptr = &nh;
-  // Advertise debug topic (String) as latched so the last message is delivered to late subscribers/rosbag
-  pub_debug = nh.advertise<std_msgs::String>("/grid_debug", 10, true);
 
   dynamic_reconfigure::Server<my_dyn_rec::MyParamsConfig> server;
   dynamic_reconfigure::Server<my_dyn_rec::MyParamsConfig>::CallbackType f;
