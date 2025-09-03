@@ -12,7 +12,7 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Header
 
 # Custom Messages
-from magv_vln_msgs.msg import PositionCommand, PathPoint
+from magv_vln_msgs.msg import PositionCommand, PathPoint, VehicleStatus
 
 class Controller:
     def __init__(self):
@@ -23,6 +23,7 @@ class Controller:
         self.current_velocity = None
         self.target_pose = None
         self.control_active = False
+        self.vln_state = None  # gate control by VLN state
 
         # Thread safety
         self.control_lock = Lock()
@@ -49,6 +50,11 @@ class Controller:
         self.position_tolerance = rospy.get_param('~position_tolerance', 0.1)
         self.orientation_tolerance = rospy.get_param('~orientation_tolerance', 0.1)
 
+        # Safety option: publish zero cmd_vel periodically during INITIALIZING state only
+        self.enable_init_zero = rospy.get_param('~enable_init_zero', True)
+        self.init_zero_rate = rospy.get_param('~init_zero_rate', 5.0)  # Hz
+        self.init_zero_angular_guard = rospy.get_param('~init_zero_angular_guard', 0.05)  # rad/s, skip zeroing if actively rotating
+
         self.position_integral_clamp = rospy.get_param('~position_integral_clamp', 1.0)
         self.orientation_integral_clamp = rospy.get_param('~orientation_integral_clamp', 0.5)
         # PID error tracking
@@ -67,9 +73,17 @@ class Controller:
         self.body_goal_sub = rospy.Subscriber('/body_goal', PositionCommand, self.body_goal_callback, queue_size=1)
         self.velocity_goal_sub = rospy.Subscriber('/velocity_goal', Twist, self.velocity_goal_callback, queue_size=1)
         self.path_point_sub = rospy.Subscriber('/path_point', PathPoint, self.path_point_callback, queue_size=1)
+        self.vln_status_sub = rospy.Subscriber('/vln_status', VehicleStatus, self.vln_status_callback, queue_size=1)
 
         # Control timer
         self.control_timer = rospy.Timer(rospy.Duration(0.05), self.control_loop)  # 20Hz control loop
+
+        # Zero-velocity safety timer (active only in INITIALIZING when enabled)
+        try:
+            period = 1.0 / max(0.1, float(self.init_zero_rate))
+        except Exception:
+            period = 0.2
+        self.init_zero_timer = rospy.Timer(rospy.Duration(max(0.05, period)), self.init_zero_loop)
 
         rospy.loginfo("Controller initialized")
 
@@ -83,9 +97,25 @@ class Controller:
             self.current_pose = msg.pose.pose
             self.current_velocity = msg.twist.twist
 
+    def vln_status_callback(self, msg):
+        """Track VLN state for gating controls"""
+        with self.control_lock:
+            old_state = self.vln_state
+            if old_state != msg.state:
+                rospy.loginfo("VLN state changed: %s -> %s (%s -> %d)",
+                              self.state_name(old_state), self.state_name(msg.state),
+                              str(old_state) if old_state is not None else "None", msg.state)
+            self.vln_state = msg.state
+
+    def is_navigation(self):
+        return self.vln_state == VehicleStatus.STATE_NAVIGATION
+
     def world_goal_callback(self, msg):
         """Handle world coordinate goal commands"""
         with self.control_lock:
+            if not self.is_navigation():
+                rospy.logwarn("Ignoring world goal since VLN state != NAVIGATION")
+                return
             rospy.loginfo(f"Received world goal: x={msg.position.x:.2f}, y={msg.position.y:.2f}, yaw={msg.yaw:.2f}")
 
             # Convert to target pose
@@ -112,6 +142,9 @@ class Controller:
             return
 
         with self.control_lock:
+            if not self.is_navigation():
+                rospy.logwarn("Ignoring body goal since VLN state != NAVIGATION")
+                return
             rospy.loginfo(f"Received body goal: x={msg.position.x:.2f}, y={msg.position.y:.2f}, yaw={msg.yaw:.2f}")
 
             # Transform body coordinates to world coordinates
@@ -148,8 +181,25 @@ class Controller:
         """Handle direct velocity commands"""
         rospy.loginfo(f"Received velocity goal: linear=({msg.linear.x:.2f}, {msg.linear.y:.2f}), angular={msg.angular.z:.2f}")
 
-        # Directly publish velocity command
+        # Gate: during non-NAVIGATION, allow rotation for scan but zero linear components
+        if not self.is_navigation():
+            sanitized = Twist()
+            sanitized.linear.x = 0.0
+            sanitized.linear.y = 0.0
+            # clamp angular to configured limit
+            omega = max(-self.max_angular_vel, min(self.max_angular_vel, msg.angular.z))
+            sanitized.angular.z = omega
+            self.cmd_vel_pub.publish(sanitized)
+            rospy.loginfo_throttle(1.0, "Sanitized velocity in non-NAVIGATION: zeroed linear, kept angular")
+            with self.control_lock:
+                self.control_active = False
+                self.last_cmd_vel = sanitized
+            return
+
+        # In NAVIGATION, pass through
         self.cmd_vel_pub.publish(msg)
+        # Track last command for guards/diagnostics
+        self.last_cmd_vel = msg
 
         # Disable position control when using velocity control
         with self.control_lock:
@@ -158,6 +208,9 @@ class Controller:
     def path_point_callback(self, msg):
         """Handle path point commands"""
         with self.control_lock:
+            if not self.is_navigation():
+                rospy.logwarn("Ignoring path point since VLN state != NAVIGATION")
+                return
             rospy.loginfo(f"Received path point: x={msg.position.x:.2f}, y={msg.position.y:.2f}")
 
             # Convert PathPoint to target pose
@@ -176,7 +229,7 @@ class Controller:
 
     def control_loop(self, event):
         """Main control loop"""
-        if not self.control_active or not self.current_pose or not self.target_pose:
+        if not self.control_active or not self.current_pose or not self.target_pose or not self.is_navigation():
             return
 
         with self.control_lock:
@@ -312,6 +365,18 @@ class Controller:
             status_msg.pose = self.target_pose
             self.status_pub.publish(status_msg)
 
+    def init_zero_loop(self, event):
+        """Publish zero velocity periodically in INITIALIZING state for safety (optional)."""
+        if not self.enable_init_zero:
+            return
+        if self.vln_state == VehicleStatus.STATE_INITIALIZING:
+            # Do not override active rotation (e.g., scanning)
+            if abs(self.last_cmd_vel.angular.z) > self.init_zero_angular_guard:
+                return
+            zero = Twist()
+            self.cmd_vel_pub.publish(zero)
+            rospy.loginfo_throttle(2.0, "Publishing zero cmd_vel in INITIALIZING state")
+
     def get_yaw_from_quaternion(self, quaternion):
         """Extract yaw angle from quaternion"""
         euler = tfs.euler_from_quaternion([
@@ -326,6 +391,22 @@ class Controller:
         while angle < -math.pi:
             angle += 2 * math.pi
         return angle
+
+    def state_name(self, state_code):
+        """Map VehicleStatus code to readable name"""
+        if state_code == VehicleStatus.STATE_INITIALIZING:
+            return "INITIALIZING"
+        if state_code == VehicleStatus.STATE_EXPLORATION:
+            return "EXPLORATION"
+        if state_code == VehicleStatus.STATE_NAVIGATION:
+            return "NAVIGATION"
+        if state_code == VehicleStatus.STATE_IDLE:
+            return "IDLE"
+        if state_code == VehicleStatus.STATE_ERROR:
+            return "ERROR"
+        if state_code == VehicleStatus.STATE_EMERGENCY_STOP:
+            return "EMERGENCY_STOP"
+        return "UNKNOWN"
 
     def reset_pid_errors(self):
         """Reset PID error accumulators"""

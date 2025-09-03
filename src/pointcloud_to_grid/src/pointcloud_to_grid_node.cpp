@@ -53,12 +53,12 @@ void paramsCallback(my_dyn_rec::MyParamsConfig &config, uint32_t level)
       ROS_INFO("Subscribing to new pointcloud topic: %s", last_cloud_topic.c_str());
     }
     if (last_igrid_topic != grid_map.mapi_topic_name) {
-      pub_igrid = nh_ptr->advertise<nav_msgs::OccupancyGrid>(grid_map.mapi_topic_name, 1);
+      pub_igrid = nh_ptr->advertise<nav_msgs::OccupancyGrid>(grid_map.mapi_topic_name, 1, true /* latch */);
       last_igrid_topic = grid_map.mapi_topic_name;
       ROS_INFO("Advertising new intensity grid topic: %s", last_igrid_topic.c_str());
     }
     if (last_hgrid_topic != grid_map.maph_topic_name) {
-      pub_hgrid = nh_ptr->advertise<nav_msgs::OccupancyGrid>(grid_map.maph_topic_name, 1);
+      pub_hgrid = nh_ptr->advertise<nav_msgs::OccupancyGrid>(grid_map.maph_topic_name, 1, true /* latch */);
       last_hgrid_topic = grid_map.maph_topic_name;
       ROS_INFO("Advertising new height grid topic: %s", last_hgrid_topic.c_str());
     }
@@ -66,8 +66,17 @@ void paramsCallback(my_dyn_rec::MyParamsConfig &config, uint32_t level)
 
   // First compute grid dimensions from parameters, then initialize grids
   grid_map.paramRefresh();
+  grid_map.initGrid(intensity_grid);
   grid_map.initGrid(height_grid);
-  grid_map.paramRefresh();
+
+  // Publish an initial empty grid with valid metadata so RViz subscribers see correct size immediately
+  ros::Time now = ros::Time::now();
+  intensity_grid->header.stamp = now;
+  height_grid->header.stamp = now;
+  intensity_grid->info.map_load_time = now;
+  height_grid->info.map_load_time = now;
+  if (pub_igrid) pub_igrid.publish(intensity_grid);
+  if (pub_hgrid) pub_hgrid.publish(height_grid);
 }
 
 
@@ -135,6 +144,7 @@ void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
   }
 
   ros::Time now = ros::Time::now();
+  intensity_grid->header.stamp = now;
   height_grid->header.stamp = now;
   intensity_grid->info.map_load_time = now;
   height_grid->info.map_load_time = now;
