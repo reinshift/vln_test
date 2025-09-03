@@ -129,6 +129,7 @@ class CoreNode:
                         # Reset scan and plan state for new subtask
                         self.scan_and_plan_complete = False
                         self.directional_detections = {}  # Clear previous detections
+                        self.current_path_points = []  # Clear previous path points
                     rospy.loginfo(f"Received subtasks: {len(self.current_subtasks)} tasks, current index: {self.current_subtask_index}")
                     rospy.loginfo(f"Current subtask: {self.current_subtask}")
                 except json.JSONDecodeError as e:

@@ -107,7 +107,12 @@ void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
       const float z = *iter_z;
       const float inten = has_intensity ? *iter_i : 0.0f;
 
+      // Enhanced noise filtering
       if (std::fabs(x) <= 0.01f) continue; // filter near-origin
+      if (std::isnan(x) || std::isnan(y) || std::isnan(z)) continue; // filter NaN values
+      if (std::fabs(z) > 3.0f) continue; // filter extreme height values
+      if (std::sqrt(x*x + y*y) > 20.0f) continue; // filter points too far away
+      
       if (x <= grid_map.topleft_x || x >= grid_map.bottomright_x) continue;
       if (y <= grid_map.bottomright_y || y >= grid_map.topleft_y) continue;
 

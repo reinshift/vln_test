@@ -40,8 +40,9 @@ class GridMap{
       grid->info.resolution = cell_size;
       grid->info.width = cell_num_x;
       grid->info.height = cell_num_y;
-      grid->info.origin.position.x = topleft_x;
-      grid->info.origin.position.y = bottomright_y;
+      // Set origin to center the map around the robot position
+      grid->info.origin.position.x = position_x - length_x / 2.0;
+      grid->info.origin.position.y = position_y - length_y / 2.0;
       grid->info.origin.position.z = 0;
       grid->info.origin.orientation.w = 1;
       grid->data.assign(cell_num_x * cell_num_y, -1);
