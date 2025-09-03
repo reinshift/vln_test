@@ -102,6 +102,14 @@ class CoreNode:
         self.horizontal_fov = rospy.get_param('~horizontal_fov', 2.0) # radians
         self.f_x = (self.image_width / 2.0) / np.tan(self.horizontal_fov / 2.0)
 
+        # Value map smoothing (softmax-like) temperature; 0 disables smoothing
+        try:
+            self.value_smoothing_tau = float(rospy.get_param('~value_smoothing_tau', 0.0))
+        except Exception:
+            self.value_smoothing_tau = 0.0
+        if self.value_smoothing_tau is not None and self.value_smoothing_tau < 0.0:
+            self.value_smoothing_tau = 0.0
+
         # Control timer for navigation
         self.control_timer = rospy.Timer(rospy.Duration(0.1), self.control_timer_callback)
 
@@ -369,7 +377,7 @@ class CoreNode:
             return
 
         for detection in msg.detections:
-            label = detection.label
+            label = (detection.label or '').strip().lower()
             if label not in self.directional_detections:
                 self.directional_detections[label] = []
             # Store the yaw and the full detection message
@@ -443,9 +451,11 @@ class CoreNode:
         direction = 'forward' # Default value
         for key, value in self.current_subtask.items():
             if 'subtask' in key:
-                direction = value
+                direction = (value or '').strip().lower()
                 break
         goal = self.current_subtask.get('goal', None)
+        if isinstance(goal, str):
+            goal = goal.strip().lower() if goal else None
 
         # Get current robot yaw for orientation-aware value calculation
         current_yaw = 0.0
@@ -470,6 +480,33 @@ class CoreNode:
                 value = self.compute_cell_value(world_x, world_y, direction, goal, current_yaw)
                 values[idx] = value
 
+        # Optional value smoothing (softmax-like) excluding obstacles
+        tau = getattr(self, 'value_smoothing_tau', 0.0) or 0.0
+        if tau > 1e-6:
+            try:
+                # mask: True for free cells
+                occ = np.array(self.occupancy_grid.data, dtype=np.int16).reshape((height, width))
+                free_mask = (occ <= 50)
+                vals2d = values.reshape((height, width))
+                # For numerical stability: subtract max over free cells
+                max_free = np.max(vals2d[free_mask]) if np.any(free_mask) else 0.0
+                exp_vals = np.zeros_like(vals2d, dtype=np.float32)
+                exp_vals[free_mask] = np.exp((vals2d[free_mask] - max_free) / tau)
+                # Preserve obstacles as -1000, scale free cells to [0,1] by normalizing softmax weights
+                sum_exp = np.sum(exp_vals[free_mask])
+                if sum_exp > 0:
+                    smoothed = np.full_like(vals2d, -1000.0, dtype=np.float32)
+                    # Convert weights to a value field in [0,1] then rescale back to original dynamic range around max
+                    weights = exp_vals[free_mask] / sum_exp
+                    # Map weights to a comparable scale: use (weights * N) as relative scores (N=free cells count)
+                    N = np.count_nonzero(free_mask)
+                    rel = weights * max(1, N)
+                    smoothed_vals = rel.astype(np.float32)
+                    smoothed[free_mask] = smoothed_vals
+                    values = smoothed.ravel()
+            except Exception as e:
+                rospy.logwarn_throttle(5.0, f"Value smoothing failed: {e}")
+
         value_map.data = values.tolist()
         self.value_map = value_map
         self.value_map_pub.publish(value_map)
@@ -478,7 +515,9 @@ class CoreNode:
 
         # Also publish a 20x20 preview matrix for quick visualization
         try:
-            preview = self._build_value_map_preview(values, width, height, target_size=20)
+            # Reshape to 2D (height, width) for preview sampling
+            values_2d = values.reshape((height, width))
+            preview = self._build_value_map_preview(values_2d, width, height, target_size=20)
             self.value_map_preview_pub.publish(preview)
         except Exception as e:
             rospy.logwarn_throttle(5.0, f"Failed to publish value map preview: {e}")
@@ -512,8 +551,11 @@ class CoreNode:
         goal_seen = False
 
         # --- Directional Value from Rotational Scan ---
-        if goal and goal in self.directional_detections:
-            cell_angle = math.atan2(y, x)
+        if goal and goal in self.directional_detections and self.current_pose is not None:
+            # Compute angle of the cell relative to robot position (world -> robot-centered)
+            rx = x - self.current_pose.position.x
+            ry = y - self.current_pose.position.y
+            cell_angle = math.atan2(ry, rx)
 
             for (detection_yaw, detection) in self.directional_detections[goal]:
                 # Calculate the angular cone where the object was detected
@@ -541,9 +583,14 @@ class CoreNode:
 
         # --- Fallback: Directional Guidance (if goal was not seen or no goal) ---
         if not goal_seen:
-            # Convert cell position to robot's local frame for directional calculation
-            local_x = x * math.cos(-current_yaw) - y * math.sin(-current_yaw)
-            local_y = x * math.sin(-current_yaw) + y * math.cos(-current_yaw)
+            # Convert world (x,y) to robot local frame around current robot position
+            if self.current_pose is not None:
+                dx = x - self.current_pose.position.x
+                dy = y - self.current_pose.position.y
+            else:
+                dx, dy = x, y
+            local_x = dx * math.cos(-current_yaw) - dy * math.sin(-current_yaw)
+            local_y = dx * math.sin(-current_yaw) + dy * math.cos(-current_yaw)
 
             if direction == 'forward':
                 base_value += local_x * 10.0
@@ -642,7 +689,7 @@ class CoreNode:
         """Main control loop for navigation"""
         if not self.navigation_active or not self.current_path_points:
             return
-        
+
         # Don't execute position control during scanning phase
         if self.scan_in_progress:
             return
@@ -660,7 +707,14 @@ class CoreNode:
         cmd.velocity.x = 0.0
         cmd.velocity.y = 0.0
         cmd.velocity.z = 0.0
-        cmd.yaw = self.get_yaw_from_quaternion(current_waypoint.orientation)
+        # Always face the current target waypoint (robot pose -> waypoint)
+        if self.current_pose is not None:
+            dx = current_waypoint.position.x - self.current_pose.position.x
+            dy = current_waypoint.position.y - self.current_pose.position.y
+            cmd.yaw = math.atan2(dy, dx)
+        else:
+            # Fallback to waypoint's stored orientation
+            cmd.yaw = self.get_yaw_from_quaternion(current_waypoint.orientation)
         cmd.yaw_dot = 0.0
 
         self.controller_discrete_pub.publish(cmd)

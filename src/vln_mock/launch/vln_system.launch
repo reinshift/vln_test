@@ -99,7 +99,7 @@
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
         <env name="PYTHONHOME" value="" />
-        <param name="emergency_stop_distance" value="0.2"/>
+        <param name="emergency_stop_distance" value="0.25"/>
     </node>
 
     <!-- Controller Node -->
@@ -137,6 +137,7 @@
         <param name="aruco_detection_threshold" value="0.3"/>
         <param name="image_width" value="1080"/>
         <param name="horizontal_fov" value="2.0"/>
+        <param name="value_smoothing_tau" value="0.0"/>
         <!-- Scan behavior -->
         <param name="max_angular_vel" value="6.28"/>
         <param name="scan_duration_sec" value="5.0"/>
