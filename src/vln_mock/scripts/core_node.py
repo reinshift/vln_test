@@ -11,7 +11,7 @@ from collections import deque
 import tf.transformations as tfs
 
 # ROS Messages
-from std_msgs.msg import String, Int32, Bool
+from std_msgs.msg import String, Int32, Bool, Float32MultiArray, MultiArrayDimension
 from nav_msgs.msg import OccupancyGrid, Odometry
 from geometry_msgs.msg import Point, Twist, PoseStamped, Quaternion
 from sensor_msgs.msg import CompressedImage
@@ -57,6 +57,7 @@ class CoreNode:
 
         # Publishers
         self.value_map_pub = rospy.Publisher('/value_map', ValueMap, queue_size=1)
+        self.value_map_preview_pub = rospy.Publisher('/value_map_preview', Float32MultiArray, queue_size=1)
         self.path_point_pub = rospy.Publisher('/path_point', PathPoint, queue_size=10)
         self.controller_discrete_pub = rospy.Publisher('/world_goal', PositionCommand, queue_size=10)
         # Prefer sending velocity goals to the controller so it can enforce limits
@@ -474,6 +475,32 @@ class CoreNode:
 
         rospy.loginfo("Value map computed and published")
 
+        # Also publish a 20x20 preview matrix for quick visualization
+        try:
+            preview = self._build_value_map_preview(values, width, height, target_size=20)
+            self.value_map_preview_pub.publish(preview)
+        except Exception as e:
+            rospy.logwarn_throttle(5.0, f"Failed to publish value map preview: {e}")
+
+    def _build_value_map_preview(self, values_np, width, height, target_size=20):
+        """
+        Build a Float32MultiArray preview of size target_size x target_size from the full value map.
+        Uses nearest-neighbor sampling for robustness and speed.
+        """
+        # values_np is a 2D array shaped (height, width)
+        ys = np.linspace(0, height - 1, target_size).astype(int)
+        xs = np.linspace(0, width - 1, target_size).astype(int)
+        sampled = values_np[ys[:, None], xs[None, :]]  # shape (target_size, target_size)
+
+        msg = Float32MultiArray()
+        # Layout: 2D (rows=target_size, cols=target_size), row-major
+        dim_rows = MultiArrayDimension(label='rows', size=target_size, stride=target_size * target_size)
+        dim_cols = MultiArrayDimension(label='cols', size=target_size, stride=target_size)
+        msg.layout.dim = [dim_rows, dim_cols]
+        msg.layout.data_offset = 0
+        msg.data = sampled.astype(np.float32).ravel().tolist()
+        return msg
+
     def compute_cell_value(self, x, y, direction, goal, current_yaw):
         """
         Compute value for a single cell. This now prioritizes directional detections
@@ -550,7 +577,7 @@ class CoreNode:
         values = np.array(self.value_map.data).reshape((self.value_map.info.height, self.value_map.info.width))
 
         # Parameters for path generation
-        num_waypoints = 5
+        num_waypoints = 3
         suppression_radius_pixels = int(0.5 / self.value_map.info.resolution) # 0.5 meters
 
         temp_values = np.copy(values)
