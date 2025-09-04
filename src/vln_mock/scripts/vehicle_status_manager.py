@@ -13,7 +13,7 @@ from geometry_msgs.msg import Point, Twist
 import sensor_msgs.point_cloud2 as pc2
 
 # Custom Messages
-from magv_vln_msgs.msg import VehicleStatus
+from magv_vln_msgs.msg import VehicleStatus, PositionCommand
 
 class VehicleStatusManager:
     def __init__(self):
@@ -47,14 +47,17 @@ class VehicleStatusManager:
         self.odometry_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
         self.pointcloud_sub = rospy.Subscriber('/magv/scan/3d', PointCloud2, self.pointcloud_callback, queue_size=1)
         self.cmd_vel_sub = rospy.Subscriber('/magv/omni_drive_controller/cmd_vel', Twist, self.cmd_vel_callback, queue_size=1)
-        
-        # Current position
+        # Subscribe to latest goal to reflect in status.target_position
+        self.world_goal_sub = rospy.Subscriber('/world_goal', PositionCommand, self.world_goal_callback, queue_size=1)
+
+        # Current position / target
         self.current_position = Point()
+        self.latest_target_position = Point()
         self.odometry_frame_id = "map"  # Default frame_id
-        
+
         # Status publishing timer
         self.status_timer = rospy.Timer(rospy.Duration(1.0), self.publish_status)
-        
+
         rospy.loginfo("Vehicle Status Manager initialized")
 
     def subtasks_callback(self, msg):
@@ -120,6 +123,11 @@ class VehicleStatusManager:
         if not self.emergency_stop_active:
             self.current_velocity = msg
 
+    def world_goal_callback(self, msg):
+        """Track the latest world goal for status.target_position"""
+        # Directly store the position component
+        self.latest_target_position = msg.position
+
     def pointcloud_callback(self, msg):
         """Handle pointcloud updates for emergency stop detection"""
         self.navigation_ready = True  # Assume navigation is ready if we get pointclouds
@@ -173,7 +181,9 @@ class VehicleStatusManager:
             
             # Position
             status_msg.current_position = self.current_position
-            
+            # Reflect latest target if any
+            status_msg.target_position = self.latest_target_position
+
             # Subtask information
             if self.subtasks:
                 status_msg.current_subtask_json = json.dumps(self.subtasks)

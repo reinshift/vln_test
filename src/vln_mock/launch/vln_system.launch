@@ -35,6 +35,9 @@
         <!-- Align intensity grid with core_node subscription -->
         <param name="mapi_topic_name" value="/occupancy_grid"/>
         <param name="maph_topic_name" value="/height_grid"/>
+        <!-- Simple Z filter to suppress ground/overhead -->
+        <param name="min_z" value="0.05"/>
+        <param name="max_z" value="1.50"/>
     </node>
 
     <!-- ArUco Detector Node -->
@@ -100,6 +103,12 @@
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
         <env name="PYTHONHOME" value="" />
         <param name="emergency_stop_distance" value="0.25"/>
+    </node>
+
+    <!-- TF Broadcaster (map -> base_footprint and optional alias) -->
+    <node name="odom_tf_broadcaster" pkg="vln_mock" type="odom_tf_broadcaster.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <param name="default_child_frame_id" value="base_footprint"/>
+        <param name="alias_child_frame_id" value="magv/base_link"/>
     </node>
 
     <!-- Controller Node -->

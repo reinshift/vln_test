@@ -21,6 +21,9 @@ ros::NodeHandle* nh_ptr = nullptr;
 std::string last_cloud_topic = "";
 std::string last_igrid_topic = "";
 std::string last_hgrid_topic = "";
+// Simple height filter params (static rosparams)
+static double g_min_z = 0.05;  // meters
+static double g_max_z = 1.5;   // meters
 
 // Forward declaration (subscribe to sensor_msgs::PointCloud2)
 void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg);
@@ -119,9 +122,10 @@ void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
       // Enhanced noise filtering
       if (std::fabs(x) <= 0.01f) continue; // filter near-origin
       if (std::isnan(x) || std::isnan(y) || std::isnan(z)) continue; // filter NaN values
-      if (std::fabs(z) > 3.0f) continue; // filter extreme height values
+      // Height filter from rosparams (default 0.05~1.5m) to suppress ground/overhead points
+      if (z < static_cast<float>(g_min_z) || z > static_cast<float>(g_max_z)) continue;
       if (std::sqrt(x*x + y*y) > 20.0f) continue; // filter points too far away
-      
+
       if (x <= grid_map.topleft_x || x >= grid_map.bottomright_x) continue;
       if (y <= grid_map.bottomright_y || y >= grid_map.topleft_y) continue;
 

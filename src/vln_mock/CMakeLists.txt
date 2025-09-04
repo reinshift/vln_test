@@ -38,6 +38,7 @@ catkin_install_python(PROGRAMS
   scripts/vehicle_status_manager.py
   scripts/ground_dino_simulator.py
   scripts/instruction_latch_bridge.py
+  scripts/odom_tf_broadcaster.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
