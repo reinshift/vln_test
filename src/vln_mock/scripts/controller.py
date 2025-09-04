@@ -22,6 +22,7 @@ class Controller:
         self.current_pose = None
         self.current_velocity = None
         self.target_pose = None
+        self.pending_target_pose = None  # cache goals arriving before NAVIGATION
         self.control_active = False
         self.vln_state = None  # gate control by VLN state
 
@@ -106,34 +107,41 @@ class Controller:
                               self.state_name(old_state), self.state_name(msg.state),
                               str(old_state) if old_state is not None else "None", msg.state)
             self.vln_state = msg.state
+            # If we have a target already but were waiting for NAVIGATION, arm control now
+            if self.is_navigation() and self.target_pose is not None and not self.control_active:
+                rospy.loginfo("Entering NAVIGATION with a pending goal; arming controller now")
+                self.control_active = True
+                self.reset_pid_errors()
 
     def is_navigation(self):
         return self.vln_state == VehicleStatus.STATE_NAVIGATION
 
     def world_goal_callback(self, msg):
         """Handle world coordinate goal commands"""
+        # Build a Pose from incoming command
+        target_pose = PoseStamped()
+        target_pose.header.stamp = rospy.Time.now()
+        target_pose.header.frame_id = "map"
+        target_pose.pose.position = msg.position
+        quat = tfs.quaternion_from_euler(0, 0, msg.yaw)
+        target_pose.pose.orientation.x = quat[0]
+        target_pose.pose.orientation.y = quat[1]
+        target_pose.pose.orientation.z = quat[2]
+        target_pose.pose.orientation.w = quat[3]
+
         with self.control_lock:
             if not self.is_navigation():
-                rospy.logwarn("Ignoring world goal since VLN state != NAVIGATION")
+                # Cache pending goal to execute when NAVIGATION starts
+                self.pending_target_pose = target_pose.pose
+                rospy.logwarn("Received world goal while not in NAVIGATION; cached as pending goal")
                 return
+
             rospy.loginfo(f"Received world goal: x={msg.position.x:.2f}, y={msg.position.y:.2f}, yaw={msg.yaw:.2f}")
-
-            # Convert to target pose
-            target_pose = PoseStamped()
-            target_pose.header.stamp = rospy.Time.now()
-            target_pose.header.frame_id = "map"
-            target_pose.pose.position = msg.position
-
-            # Convert yaw to quaternion
-            quat = tfs.quaternion_from_euler(0, 0, msg.yaw)
-            target_pose.pose.orientation.x = quat[0]
-            target_pose.pose.orientation.y = quat[1]
-            target_pose.pose.orientation.z = quat[2]
-            target_pose.pose.orientation.w = quat[3]
-
             self.target_pose = target_pose.pose
             self.control_active = True
             self.reset_pid_errors()
+            # Clear any pending since we are acting on a fresh goal
+            self.pending_target_pose = None
 
     def body_goal_callback(self, msg):
         """Handle body coordinate goal commands"""
@@ -141,41 +149,38 @@ class Controller:
             rospy.logwarn("No current pose available for body coordinate transformation")
             return
 
+        # First compute target in world frame
+        current_yaw = self.get_yaw_from_quaternion(self.current_pose.orientation)
+        cos_yaw = math.cos(current_yaw)
+        sin_yaw = math.sin(current_yaw)
+        world_x = self.current_pose.position.x + (msg.position.x * cos_yaw - msg.position.y * sin_yaw)
+        world_y = self.current_pose.position.y + (msg.position.x * sin_yaw + msg.position.y * cos_yaw)
+        world_yaw = current_yaw + msg.yaw
+
+        target_pose = PoseStamped()
+        target_pose.header.stamp = rospy.Time.now()
+        target_pose.header.frame_id = "map"
+        target_pose.pose.position.x = world_x
+        target_pose.pose.position.y = world_y
+        target_pose.pose.position.z = self.current_pose.position.z + msg.position.z
+        quat = tfs.quaternion_from_euler(0, 0, world_yaw)
+        target_pose.pose.orientation.x = quat[0]
+        target_pose.pose.orientation.y = quat[1]
+        target_pose.pose.orientation.z = quat[2]
+        target_pose.pose.orientation.w = quat[3]
+
         with self.control_lock:
             if not self.is_navigation():
-                rospy.logwarn("Ignoring body goal since VLN state != NAVIGATION")
+                # Cache pending body goal (converted to world pose) until NAVIGATION
+                self.pending_target_pose = target_pose.pose
+                rospy.logwarn("Received body goal while not in NAVIGATION; cached as pending goal")
                 return
+
             rospy.loginfo(f"Received body goal: x={msg.position.x:.2f}, y={msg.position.y:.2f}, yaw={msg.yaw:.2f}")
-
-            # Transform body coordinates to world coordinates
-            current_yaw = self.get_yaw_from_quaternion(self.current_pose.orientation)
-
-            # Rotate body coordinates to world frame
-            cos_yaw = math.cos(current_yaw)
-            sin_yaw = math.sin(current_yaw)
-
-            world_x = self.current_pose.position.x + (msg.position.x * cos_yaw - msg.position.y * sin_yaw)
-            world_y = self.current_pose.position.y + (msg.position.x * sin_yaw + msg.position.y * cos_yaw)
-            world_yaw = current_yaw + msg.yaw
-
-            # Create target pose
-            target_pose = PoseStamped()
-            target_pose.header.stamp = rospy.Time.now()
-            target_pose.header.frame_id = "map"
-            target_pose.pose.position.x = world_x
-            target_pose.pose.position.y = world_y
-            target_pose.pose.position.z = self.current_pose.position.z + msg.position.z
-
-            # Convert yaw to quaternion
-            quat = tfs.quaternion_from_euler(0, 0, world_yaw)
-            target_pose.pose.orientation.x = quat[0]
-            target_pose.pose.orientation.y = quat[1]
-            target_pose.pose.orientation.z = quat[2]
-            target_pose.pose.orientation.w = quat[3]
-
             self.target_pose = target_pose.pose
             self.control_active = True
             self.reset_pid_errors()
+            self.pending_target_pose = None
 
     def velocity_goal_callback(self, msg):
         """Handle direct velocity commands"""
@@ -229,6 +234,15 @@ class Controller:
 
     def control_loop(self, event):
         """Main control loop"""
+        # If we just entered NAVIGATION and have a pending goal, arm it
+        if self.is_navigation() and not self.control_active and self.pending_target_pose is not None:
+            with self.control_lock:
+                self.target_pose = self.pending_target_pose
+                self.pending_target_pose = None
+                self.control_active = True
+                self.reset_pid_errors()
+                rospy.loginfo("Armed pending goal at control loop start")
+
         if not self.control_active or not self.current_pose or not self.target_pose or not self.is_navigation():
             return
 

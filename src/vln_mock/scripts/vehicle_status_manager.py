@@ -31,7 +31,7 @@ class VehicleStatusManager:
         self.current_velocity = Twist()
         self.emergency_stop_distance = rospy.get_param('~emergency_stop_distance', 0.5) # meters
         # Height filtering to suppress ground/overhead points
-        self.min_obstacle_z = rospy.get_param('~min_obstacle_z', 0.05)  # meters, ignore very low ground points
+        self.min_obstacle_z = rospy.get_param('~min_obstacle_z', 0.15)  # meters, ignore ground points (raised from 0.05)
         self.max_obstacle_z = rospy.get_param('~max_obstacle_z', 1.5)   # meters, ignore high overhead points
 
         # Thread safety
