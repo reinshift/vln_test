@@ -102,7 +102,7 @@
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
         <env name="PYTHONHOME" value="" />
-        <param name="emergency_stop_distance" value="0.25"/>
+        <param name="emergency_stop_distance" value="0.15"/>
     </node>
 
     <!-- TF Broadcaster (map -> base_footprint and optional alias) -->
