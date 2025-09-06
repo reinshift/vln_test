@@ -12,6 +12,11 @@ from sensor_msgs.msg import PointCloud2
 from geometry_msgs.msg import Point, Twist
 import sensor_msgs.point_cloud2 as pc2
 
+# TF2
+import tf2_ros
+import tf.transformations as tfs
+import numpy as np
+
 # Custom Messages
 from magv_vln_msgs.msg import VehicleStatus, PositionCommand
 
@@ -71,10 +76,15 @@ class VehicleStatusManager:
         self.latest_target_position = Point()
         self.odometry_frame_id = "map"  # Default frame_id
 
+        # TF buffer/listener and base frame
+        self.base_frame = rospy.get_param('~base_frame', 'magv/base_link')
+        self.tf_buffer = tf2_ros.Buffer(rospy.Duration(10.0))
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
         # Status publishing timer
         self.status_timer = rospy.Timer(rospy.Duration(1.0), self.publish_status)
 
-        rospy.loginfo("Vehicle Status Manager initialized")
+        rospy.loginfo("Vehicle Status Manager initialized (base_frame=%s)", self.base_frame)
 
     def subtasks_callback(self, msg):
         """Handle subtasks from VLM processor"""
@@ -154,6 +164,27 @@ class VehicleStatusManager:
         self.forward_points_count = 0
         self.last_pc_frame = msg.header.frame_id if hasattr(msg, 'header') else ''
 
+        # Lookup transform from pointcloud frame to base frame (for forward corridor check)
+        src_frame = msg.header.frame_id if hasattr(msg, 'header') else ''
+        T = None
+        if src_frame and src_frame != self.base_frame:
+            try:
+                if self.tf_buffer.can_transform(self.base_frame, src_frame, msg.header.stamp, rospy.Duration(0.05)):
+                    tf_st = self.tf_buffer.lookup_transform(self.base_frame, src_frame, msg.header.stamp, rospy.Duration(0.05))
+                else:
+                    tf_st = self.tf_buffer.lookup_transform(self.base_frame, src_frame, rospy.Time(0), rospy.Duration(0.05))
+                # Build 4x4 transform matrix
+                q = tf_st.transform.rotation
+                t = tf_st.transform.translation
+                M = tfs.quaternion_matrix([q.x, q.y, q.z, q.w])
+                M[0, 3] = t.x
+                M[1, 3] = t.y
+                M[2, 3] = t.z
+                T = M
+            except Exception as e:
+                rospy.logwarn_throttle(5.0, "ES: TF lookup %s->%s failed: %s", src_frame, self.base_frame, str(e))
+                T = None
+
         # Only check for obstacles if the robot has some translational velocity
         if abs(self.current_velocity.linear.x) < 0.1 and abs(self.current_velocity.linear.y) < 0.1:
             if self.emergency_stop_active:
@@ -163,6 +194,10 @@ class VehicleStatusManager:
             # Still compute nearest distances for diagnostics
             for point in pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True):
                 x, y, z = point[0], point[1], point[2]
+                if T is not None:
+                    v = np.array([x, y, z, 1.0], dtype=float)
+                    vb = T.dot(v)
+                    x, y, z = float(vb[0]), float(vb[1]), float(vb[2])
                 d = (x*x + y*y) ** 0.5
                 if d < self.min_distance_all:
                     self.min_distance_all = d
@@ -176,6 +211,10 @@ class VehicleStatusManager:
         obstacle_detected = False
         for point in pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True):
             x, y, z = point[0], point[1], point[2]
+            if T is not None:
+                v = np.array([x, y, z, 1.0], dtype=float)
+                vb = T.dot(v)
+                x, y, z = float(vb[0]), float(vb[1]), float(vb[2])
             d = (x*x + y*y) ** 0.5
             if d < self.min_distance_all:
                 self.min_distance_all = d
@@ -262,7 +301,7 @@ class VehicleStatusManager:
             nearest_all = ("inf" if self.min_distance_all == float('inf') else f"{self.min_distance_all:.2f}")
             nearest_fwd = ("inf" if self.min_distance_forward == float('inf') else f"{self.min_distance_forward:.2f}")
             status_msg.diagnostic_info = (
-                f"{extra} | pc_frame={self.last_pc_frame} min_all={nearest_all}m min_forward_x={nearest_fwd}m "
+                f"{extra} | pc_frame={self.last_pc_frame} base_frame={self.base_frame} min_all={nearest_all}m min_forward_x={nearest_fwd}m "
                 f"fwd_count={self.forward_points_count} es_dist={self.emergency_stop_distance:.2f} es_half={self.emergency_stop_half_width:.2f} "
                 f"min_range={self.es_min_range:.2f} min_pts={self.es_min_points} hit_stk={self._es_hit_streak} clr_stk={self._es_clear_streak}"
             )
