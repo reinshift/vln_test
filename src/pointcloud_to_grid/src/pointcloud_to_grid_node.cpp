@@ -9,7 +9,20 @@
 #include <pointcloud_to_grid/pointcloud_to_grid_core.hpp>
 #include <pointcloud_to_grid/MyParamsConfig.h>
 #include <dynamic_reconfigure/server.h>
- 
+
+// TF2 for frame transformations
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2/transform_datatypes.h>
+#include <tf2/convert.h>
+#include <tf2/LinearMath/Transform.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_sensor_msgs/tf2_sensor_msgs.h>
+#include <memory>
+
 
 // Global variables
 nav_msgs::OccupancyGridPtr intensity_grid(new nav_msgs::OccupancyGrid);
@@ -21,6 +34,9 @@ ros::NodeHandle* nh_ptr = nullptr;
 std::string last_cloud_topic = "";
 std::string last_igrid_topic = "";
 std::string last_hgrid_topic = "";
+// TF2
+std::unique_ptr<tf2_ros::Buffer> g_tf_buffer;
+std::unique_ptr<tf2_ros::TransformListener> g_tf_listener;
 // Simple height filter params (static rosparams)
 static double g_min_z = 0.05;  // meters
 static double g_max_z = 1.5;   // meters
@@ -97,21 +113,45 @@ void pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
     }
   }
 
+  // Prepare point cloud in target frame (frame_out, default 'map') using tf2::doTransform
+  const std::string target_frame = grid_map.frame_out.empty() ? std::string("map") : grid_map.frame_out;
+  const std::string src_frame = msg->header.frame_id;
+  sensor_msgs::PointCloud2 cloud_tf;
+  const sensor_msgs::PointCloud2* cloud_ptr = msg.get();
+  if (!src_frame.empty() && src_frame != target_frame && g_tf_buffer) {
+    try {
+      geometry_msgs::TransformStamped tf_st;
+      if (g_tf_buffer->canTransform(target_frame, src_frame, msg->header.stamp, ros::Duration(0.05))) {
+        tf_st = g_tf_buffer->lookupTransform(target_frame, src_frame, msg->header.stamp, ros::Duration(0.05));
+      } else if (g_tf_buffer->canTransform(target_frame, src_frame, ros::Time(0), ros::Duration(0.05))) {
+        tf_st = g_tf_buffer->lookupTransform(target_frame, src_frame, ros::Time(0), ros::Duration(0.05));
+      }
+      if (!tf_st.header.frame_id.empty()) {
+        tf2::doTransform(*msg, cloud_tf, tf_st);
+        cloud_ptr = &cloud_tf;
+      } else {
+        ROS_WARN_THROTTLE(5.0, "No TF from %s to %s; using original cloud frame %s", src_frame.c_str(), target_frame.c_str(), src_frame.c_str());
+      }
+    } catch (const std::exception &e) {
+      ROS_WARN_THROTTLE(5.0, "TF transform failed: %s; using original cloud", e.what());
+    }
+  }
+
   // Clear grid data
   std::fill(intensity_grid->data.begin(), intensity_grid->data.end(), -1);
   std::fill(height_grid->data.begin(), height_grid->data.end(), -1);
 
-  // Iterate PointCloud2 directly to avoid PCL runtime issues
+  // Iterate PointCloud2 (now in target frame if TF succeeded)
   try {
-    sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
-    sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
-    sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_x(*cloud_ptr, "x");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_y(*cloud_ptr, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_z(*cloud_ptr, "z");
     // Intensity may be absent in some datasets; guard accordingly
     bool has_intensity = false;
-    for (const auto &f : msg->fields) {
+    for (const auto &f : cloud_ptr->fields) {
       if (f.name == "intensity") { has_intensity = true; break; }
     }
-    sensor_msgs::PointCloud2ConstIterator<float> iter_i(*msg, has_intensity ? "intensity" : "x");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_i(*cloud_ptr, has_intensity ? "intensity" : "x");
 
     for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z, ++iter_i) {
       const float x = *iter_x;
@@ -161,6 +201,10 @@ int main(int argc, char **argv)
   ros::init(argc, argv, "pointcloud_to_grid_node");
   ros::NodeHandle nh;
   nh_ptr = &nh;
+  // Initialize TF2 buffer/listener
+  g_tf_buffer.reset(new tf2_ros::Buffer(ros::Duration(10.0)));
+  g_tf_listener.reset(new tf2_ros::TransformListener(*g_tf_buffer));
+
 
   dynamic_reconfigure::Server<my_dyn_rec::MyParamsConfig> server;
   dynamic_reconfigure::Server<my_dyn_rec::MyParamsConfig>::CallbackType f;

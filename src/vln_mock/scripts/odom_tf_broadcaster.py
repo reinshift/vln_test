@@ -6,7 +6,8 @@ from nav_msgs.msg import Odometry
 import tf
 import tf.transformations as tfs
 
-class OdomTFBroadcaster:\n    def __init__(self):
+class OdomTFBroadcaster:
+    def __init__(self):
         rospy.init_node('odom_tf_broadcaster', anonymous=True)
         self.br = tf.TransformBroadcaster()
         self.default_child = rospy.get_param('~default_child_frame_id', 'magv/base_link')

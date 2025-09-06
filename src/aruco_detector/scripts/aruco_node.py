@@ -6,6 +6,8 @@ import cv2
 import numpy as np
 import tf.transformations as tfs
 from cv_bridge import CvBridge
+from PIL import Image
+import io
 
 # ROS Messages
 from sensor_msgs.msg import CompressedImage
@@ -100,8 +102,7 @@ class ArucoDetectorNode:
             return
 
         try:
-            np_arr = np.frombuffer(msg.data, np.uint8)
-            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            cv_image = Image.open(io.BytesIO(msg.data))
         except Exception as e:
             rospy.logerr(f"Failed to decompress image: {e}")
             return

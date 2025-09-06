@@ -19,6 +19,10 @@ find_package(catkin REQUIRED COMPONENTS
   nav_msgs
   pcl_ros
   roscpp
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  tf2_sensor_msgs
 )
 find_package(OpenCV REQUIRED)
 
@@ -47,6 +51,6 @@ link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
 add_executable(pointcloud_to_grid_node src/pointcloud_to_grid_node.cpp)
-#add_dependencies(pointcloud_to_map_node ${PROJECT_NAME}_gencfg)
+add_dependencies(pointcloud_to_grid_node ${PROJECT_NAME}_gencfg)
 target_link_libraries(pointcloud_to_grid_node ${catkin_LIBRARIES} ${OpenCV_LIBS} ${PCL_LIBRARIES})
 

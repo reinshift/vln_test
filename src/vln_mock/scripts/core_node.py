@@ -6,6 +6,7 @@ import json
 import numpy as np
 import cv2
 import math
+import re
 from threading import Lock
 from collections import deque
 import tf.transformations as tfs
@@ -60,6 +61,7 @@ class CoreNode:
         self.value_map_preview_pub = rospy.Publisher('/value_map_preview', Float32MultiArray, queue_size=1)
         self.path_point_pub = rospy.Publisher('/path_point', PathPoint, queue_size=10)
         self.controller_discrete_pub = rospy.Publisher('/world_goal', PositionCommand, queue_size=10)
+        self.controller_body_pub = rospy.Publisher('/body_goal', PositionCommand, queue_size=10)
         # Prefer sending velocity goals to the controller so it can enforce limits
         self.controller_continuous_pub = rospy.Publisher('/magv/omni_drive_controller/cmd_vel', Twist, queue_size=10)
         self.controller_velocity_pub = rospy.Publisher('/velocity_goal', Twist, queue_size=10)
@@ -744,6 +746,8 @@ class CoreNode:
         # Query VLM about detected ArUco markers
         if hasattr(self, 'latest_image'):
             query_data = {
+                "type": "vision_query",
+                "need_image": True,
                 "image_available": True,
                 "aruco_markers": [{"id": marker.id, "pose": {
                     "x": marker.pose.position.x,
@@ -771,49 +775,96 @@ class CoreNode:
         self.status_feedback_pub.publish(feedback_msg)
 
     def handle_vlm_response(self, response_data):
-        """Handle VLM response about ArUco markers"""
+        """Handle VLM response about ArUco markers with compatibility for 'vision_result' replies."""
         try:
             response = json.loads(response_data)
-            if response.get("target_found", False):
-                # Target found near ArUco marker
-                target_aruco_id = response.get("target_aruco_id")
-                rospy.loginfo(f"Target found near ArUco marker {target_aruco_id}")
-
-                # Navigate directly to the target ArUco marker
-                for marker in self.aruco_detections:
-                    if marker.id == target_aruco_id:
-                        self.navigate_to_aruco(marker)
-                        break
-            else:
-                # No target found, continue navigation
-                rospy.loginfo("No target found near ArUco markers, continuing navigation")
-                self.navigation_active = True
-
         except json.JSONDecodeError as e:
             rospy.logerr(f"Failed to parse VLM response: {e}")
             # Continue navigation on error
             self.navigation_active = True
+            return
+
+        # Primary expected schema
+        if response.get("target_found", False):
+            target_aruco_id = response.get("target_aruco_id")
+            if target_aruco_id is not None:
+                rospy.loginfo(f"Target found near ArUco marker {target_aruco_id}")
+                for marker in self.aruco_detections:
+                    if marker.id == target_aruco_id:
+                        self.navigate_to_aruco(marker)
+                        return
+            # Missing ID: fall back to continue navigation
+            rospy.logwarn("target_found=True but no target_aruco_id provided; continuing navigation")
+            self.navigation_active = True
+            return
+
+        # Compatibility: try infer an ArUco ID from 'vision_result'
+        inferred_id = None
+        try:
+            vr = response.get("vision_result", None)
+            if isinstance(vr, list):
+                text_chunks = []
+                for item in vr:
+                    if isinstance(item, str):
+                        text_chunks.append(item)
+                    elif isinstance(item, dict):
+                        for k in ("id", "marker", "marker_id", "aruco_id"):
+                            if k in item and isinstance(item[k], (int, str)):
+                                text_chunks.append(str(item[k]))
+                    else:
+                        text_chunks.append(str(item))
+                combined = " ".join(text_chunks)
+                if combined:
+                    try:
+                        ids = re.findall(r"\b(\d{1,3})\b", combined)
+                        ids_int = [int(x) for x in ids] if ids else []
+                    except Exception:
+                        ids_int = []
+                    if ids_int:
+                        current_ids = [m.id for m in self.aruco_detections] if self.aruco_detections else []
+                        for cid in ids_int:
+                            if cid in current_ids:
+                                inferred_id = cid
+                                break
+                        if inferred_id is None and len(ids_int) == 1:
+                            inferred_id = ids_int[0]
+            # If still none and exactly one detection present, choose it
+            if inferred_id is None and self.aruco_detections and len(self.aruco_detections) == 1:
+                inferred_id = self.aruco_detections[0].id
+        except Exception as e:
+            rospy.logwarn_throttle(5.0, f"vision_result compatibility parse failed: {e}")
+
+        if inferred_id is not None:
+            rospy.loginfo(f"Inferred target ArUco id {inferred_id} from vision_result; navigating to it")
+            for marker in self.aruco_detections:
+                if marker.id == inferred_id:
+                    self.navigate_to_aruco(marker)
+                    return
+
+        # Default: continue navigation
+        rospy.loginfo("No target found/inferred; continuing navigation")
+        self.navigation_active = True
 
     def navigate_to_aruco(self, marker):
-        """Navigate directly to an ArUco marker"""
-        rospy.loginfo(f"Navigating to ArUco marker {marker.id}")
+        """Navigate directly to an ArUco marker using body frame goal (base_link)."""
+        rospy.loginfo(f"Navigating to ArUco marker {marker.id} using body_goal")
 
-        # Create position command to go to ArUco marker
+        # Build body-frame PositionCommand
         cmd = PositionCommand()
+        # position: relative to robot base
         cmd.position = marker.pose.position
         cmd.velocity.x = 0.0
         cmd.velocity.y = 0.0
         cmd.velocity.z = 0.0
-        # Calculate yaw to face the marker from the current position
-        if self.current_pose:
-            dx = marker.pose.position.x - self.current_pose.position.x
-            dy = marker.pose.position.y - self.current_pose.position.y
-            cmd.yaw = math.atan2(dy, dx)
-        else:
-            cmd.yaw = 0.0 # Fallback
+        # yaw: relative rotation in body frame to face the target point
+        try:
+            cmd.yaw = math.atan2(marker.pose.position.y, marker.pose.position.x)
+        except Exception:
+            cmd.yaw = 0.0
         cmd.yaw_dot = 0.0
 
-        self.controller_discrete_pub.publish(cmd)
+        # Publish to body_goal so controller converts to world frame
+        self.controller_body_pub.publish(cmd)
 
         # Set flag that we found the final target
         self.task_completed = True

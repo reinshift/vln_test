@@ -5,6 +5,8 @@ import rospy
 import os
 import torch
 import numpy as np
+from PIL import Image
+import io
 import cv2
 from cv_bridge import CvBridge
 
@@ -80,11 +82,7 @@ class GroundingDinoNode:
             return # Don't process images if we don't have a prompt or model
 
         try:
-            # Decompress image
-            np_arr = np.frombuffer(msg.data, np.uint8)
-            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            # Convert to RGB for GroundingDINO
-            image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            image_rgb = Image.open(io.BytesIO(msg.data))
         except Exception as e:
             rospy.logerr(f"Failed to process image: {e}")
             return
