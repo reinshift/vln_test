@@ -102,10 +102,19 @@ class Controller:
         """Track VLN state for gating controls"""
         with self.control_lock:
             old_state = self.vln_state
-            if old_state != msg.state:
+            state_changed = (old_state != msg.state)
+            if state_changed:
                 rospy.loginfo("VLN state changed: %s -> %s (%s -> %d)",
                               self.state_name(old_state), self.state_name(msg.state),
                               str(old_state) if old_state is not None else "None", msg.state)
+            # If leaving NAVIGATION, actively brake and disarm controller
+            if old_state == VehicleStatus.STATE_NAVIGATION and msg.state != VehicleStatus.STATE_NAVIGATION:
+                zero = Twist()
+                self.cmd_vel_pub.publish(zero)
+                self.last_cmd_vel = zero
+                self.control_active = False
+                rospy.loginfo("Exited NAVIGATION: published zero cmd_vel and disarmed controller")
+
             self.vln_state = msg.state
             # If we have a target already but were waiting for NAVIGATION, arm control now
             if self.is_navigation() and self.target_pose is not None and not self.control_active:
@@ -383,13 +392,14 @@ class Controller:
         """Publish zero velocity periodically in INITIALIZING state for safety (optional)."""
         if not self.enable_init_zero:
             return
-        if self.vln_state == VehicleStatus.STATE_INITIALIZING:
-            # Do not override active rotation (e.g., scanning)
-            if abs(self.last_cmd_vel.angular.z) > self.init_zero_angular_guard:
+        # In any non-NAVIGATION state, publish zero at a low rate as a safety brake
+        if self.vln_state != VehicleStatus.STATE_NAVIGATION:
+            # Do not override active rotation during INITIALIZING scanning
+            if self.vln_state == VehicleStatus.STATE_INITIALIZING and abs(self.last_cmd_vel.angular.z) > self.init_zero_angular_guard:
                 return
             zero = Twist()
             self.cmd_vel_pub.publish(zero)
-            rospy.loginfo_throttle(2.0, "Publishing zero cmd_vel in INITIALIZING state")
+            rospy.loginfo_throttle(2.0, "Publishing zero cmd_vel in non-NAVIGATION state")
 
     def get_yaw_from_quaternion(self, quaternion):
         """Extract yaw angle from quaternion"""

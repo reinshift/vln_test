@@ -780,6 +780,12 @@ class CoreNode:
         rospy.loginfo("Navigation completed!")
         self.navigation_active = False
 
+        # Actively stop the robot to avoid drift after completion
+        try:
+            self.controller_continuous_pub.publish(Twist())
+        except Exception:
+            pass
+
         # Notify state machine
         feedback_msg = String()
         feedback_msg.data = json.dumps({
@@ -787,6 +793,14 @@ class CoreNode:
             "subtask_completed": True
         })
         self.status_feedback_pub.publish(feedback_msg)
+
+        # If this subtask is the last one, publish final /status=0 after a short delay
+        try:
+            total = len(self.current_subtasks) if self.current_subtasks else 0
+            if (self.current_subtask_index + 1) >= total:
+                rospy.Timer(rospy.Duration(2.0), self.final_completion_callback, oneshot=True)
+        except Exception:
+            pass
 
     def handle_vlm_response(self, response_data):
         """Handle VLM response about ArUco markers with compatibility for 'vision_result' replies."""
