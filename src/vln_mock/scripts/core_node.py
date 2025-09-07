@@ -33,6 +33,9 @@ class CoreNode:
         self.current_subtasks = []
         self.current_subtask_index = 0
         self.current_subtask = None
+        # Track last seen subtasks/index to avoid resetting during steady NAVIGATION updates
+        self.last_subtasks_json = None
+        self.last_subtask_index = None
         self.occupancy_grid = None
         self.value_map = None
         self.current_path_points = []
@@ -132,16 +135,27 @@ class CoreNode:
             # Parse subtasks if available
             if msg.current_subtask_json:
                 try:
-                    self.current_subtasks = json.loads(msg.current_subtask_json)
-                    self.current_subtask_index = msg.current_subtask_index
-                    if 0 <= self.current_subtask_index < len(self.current_subtasks):
-                        self.current_subtask = self.current_subtasks[self.current_subtask_index]
-                        # Reset scan and plan state for new subtask
+                    incoming_json = msg.current_subtask_json
+                    incoming_index = msg.current_subtask_index
+                    # Only refresh/clear when subtasks changed or index advanced
+                    should_reset = (self.last_subtasks_json != incoming_json) or (self.last_subtask_index != incoming_index)
+
+                    if should_reset:
+                        self.current_subtasks = json.loads(incoming_json)
+                        self.current_subtask_index = incoming_index
+                        if 0 <= self.current_subtask_index < len(self.current_subtasks):
+                            self.current_subtask = self.current_subtasks[self.current_subtask_index]
+                        else:
+                            self.current_subtask = None
+                        # Reset scan and plan state only when new subtasks/index detected
                         self.scan_and_plan_complete = False
                         self.directional_detections = {}  # Clear previous detections
                         self.current_path_points = []  # Clear previous path points
-                    rospy.loginfo(f"Received subtasks: {len(self.current_subtasks)} tasks, current index: {self.current_subtask_index}")
-                    rospy.loginfo(f"Current subtask: {self.current_subtask}")
+                        self.current_path_index = 0
+                        self.last_subtasks_json = incoming_json
+                        self.last_subtask_index = incoming_index
+                        rospy.loginfo(f"Updated subtasks: {len(self.current_subtasks)} tasks, current index: {self.current_subtask_index}")
+                        rospy.loginfo(f"Current subtask: {self.current_subtask}")
                 except json.JSONDecodeError as e:
                     rospy.logerr(f"Failed to parse subtasks JSON: {e}")
                     return

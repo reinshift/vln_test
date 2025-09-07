@@ -49,7 +49,7 @@ class Controller:
         self.max_linear_accel = rospy.get_param('~max_linear_accel', 3.0)
         self.max_angular_accel = rospy.get_param('~max_angular_accel', 6.28)
         self.position_tolerance = rospy.get_param('~position_tolerance', 0.1)
-        self.orientation_tolerance = rospy.get_param('~orientation_tolerance', 0.1)
+        self.orientation_tolerance = rospy.get_param('~orientation_tolerance', 0.3)
 
         # Safety option: publish zero cmd_vel periodically during INITIALIZING state only
         self.enable_init_zero = rospy.get_param('~enable_init_zero', True)
