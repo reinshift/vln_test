@@ -8,7 +8,6 @@ import numpy as np
 from PIL import Image
 import io
 import cv2
-from cv_bridge import CvBridge
 
 # ROS Messages
 from sensor_msgs.msg import CompressedImage
@@ -44,7 +43,6 @@ class GroundingDinoNode:
         self.detections_pub = rospy.Publisher('/grounding_dino/detections', Detection2DArray, queue_size=10)
 
         # --- State Variables ---
-        self.bridge = CvBridge()
         self.current_prompt = "" # The object class to detect
         self.model = None
 
@@ -101,7 +99,9 @@ class GroundingDinoNode:
                 with torch.no_grad():
                     outputs = self.model(**inputs)
 
-                target_sizes = torch.tensor([(image_rgb.shape[0], image_rgb.shape[1])], device=self.device)
+                # PIL -> size (W,H) 获取
+                w_img, h_img = image_rgb.size
+                target_sizes = torch.tensor([(h_img, w_img)], device=self.device)
                 results = self.processor.post_process_grounded_object_detection(
                     outputs,
                     inputs.get('input_ids'),
@@ -118,7 +118,6 @@ class GroundingDinoNode:
                     return
 
                 # 转为与原始代码兼容的归一化 cx,cy,w,h 与 phrases/logits
-                h_img, w_img = image_rgb.shape[0], image_rgb.shape[1]
                 boxes_list = []
                 for b in boxes_xyxy:
                     x1, y1, x2, y2 = b.tolist()
@@ -164,7 +163,7 @@ class GroundingDinoNode:
             detection.score = logits[i].item()
 
             # Convert box format from [cx, cy, w, h] (normalized) to BoundingBox2D
-            h, w, _ = cv_image.shape
+            w, h = image_rgb.size
             box_tensor = boxes[i]
             center_x = box_tensor[0] * w
             center_y = box_tensor[1] * h

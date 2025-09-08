@@ -22,7 +22,7 @@ from magv_vln_msgs.msg import (
     VehicleStatus, ValueMap, PathPoint, PositionCommand,
     DetectedObjectArray, Detection2DArray
 )
-from aruco_detector.msg import ArucoInfo, ArucoMarker
+from magv_vln_msgs.msg import ArucoInfo, ArucoMarker
 
 class CoreNode:
     def __init__(self):
@@ -55,6 +55,13 @@ class CoreNode:
         self.current_yaw = 0.0
         self.current_pose = None
         self.last_odom_time = None
+
+        # ArUco target tracking (direct navigation mode)
+        self.aruco_target_active = False
+        self.aruco_target_id = None
+        self.aruco_last_pose = None  # geometry_msgs/Pose in body frame
+        self.aruco_close_counter = 0
+        self.aruco_arrival_distance = rospy.get_param('~aruco_arrival_distance', 0.3)
 
         # Thread safety
         self.state_lock = Lock()
@@ -119,6 +126,13 @@ class CoreNode:
         self.dir_band_half_width_m = rospy.get_param('~directional_band_half_width_m', 0.4)
         self.dir_longitudinal_gain = rospy.get_param('~directional_longitudinal_gain', 10.0)
         self.dir_lateral_sigma_m = rospy.get_param('~directional_lateral_sigma_m', self.dir_band_half_width_m / 2.0)
+
+        # Near-obstacle attractor in directional band
+        self.near_obstacle_boost_enable = rospy.get_param('~near_obstacle_boost_enable', True)
+        self.near_obstacle_boost_gain = rospy.get_param('~near_obstacle_boost_gain', 300.0)
+        self.near_obstacle_lateral_min_weight = rospy.get_param('~near_obstacle_lateral_min_weight', 0.1)
+        self.near_obstacle_step_m = rospy.get_param('~near_obstacle_step_m', self.grid_resolution)
+
 
         # Control timer for navigation
         self.control_timer = rospy.Timer(rospy.Duration(0.1), self.control_timer_callback)
@@ -644,6 +658,47 @@ class CoreNode:
 
             base_value += gain * lon * lateral_weight
 
+            # Near-obstacle attractor: if the immediate cell ahead along the desired direction is an obstacle,
+            # boost the current free cell to attract the robot to stop before the obstacle within the strip.
+            if getattr(self, 'near_obstacle_boost_enable', True) and lateral_weight >= getattr(self, 'near_obstacle_lateral_min_weight', 0.1):
+                try:
+                    og = self.occupancy_grid
+                    if og is not None:
+                        step = float(getattr(self, 'near_obstacle_step_m', self.grid_resolution) or self.grid_resolution)
+                        ox = og.info.origin.position.x
+                        oy = og.info.origin.position.y
+                        res = og.info.resolution
+                        width = int(og.info.width)
+                        height = int(og.info.height)
+
+                        # Determine unit direction vector in world frame
+                        cy = math.cos(current_yaw)
+                        sy = math.sin(current_yaw)
+                        if direction == 'forward':
+                            ux, uy = cy, sy
+                        elif direction == 'backward':
+                            ux, uy = -cy, -sy
+                        elif direction == 'left':
+                            ux, uy = -sy, cy
+                        elif direction == 'right':
+                            ux, uy = sy, -cy
+                        else:
+                            ux, uy = cy, sy
+
+                        ahead_x = x + step * ux
+                        ahead_y = y + step * uy
+
+                        ix_next = int(math.floor((ahead_x - ox) / res))
+                        iy_next = int(math.floor((ahead_y - oy) / res))
+
+                        if 0 <= ix_next < width and 0 <= iy_next < height:
+                            idx_next = iy_next * width + ix_next
+                            if og.data[idx_next] > 50:
+                                boost = float(getattr(self, 'near_obstacle_boost_gain', 200.0) or 200.0)
+                                base_value += boost * lateral_weight
+                except Exception:
+                    pass
+
         base_value += np.random.normal(0, 1.0)
         return base_value
 
@@ -754,6 +809,31 @@ class CoreNode:
         if self.current_pose is not None:
             dx = current_waypoint.position.x - self.current_pose.position.x
             dy = current_waypoint.position.y - self.current_pose.position.y
+        # If in ArUco direct-navigation mode, continuously update body_goal until arrival
+        if self.aruco_target_active and self.aruco_last_pose is not None:
+            try:
+                # Use the last seen pose in body frame to build a PositionCommand
+                cmd = PositionCommand()
+                cmd.position = self.aruco_last_pose.position
+                cmd.velocity.x = 0.0
+                cmd.velocity.y = 0.0
+                cmd.velocity.z = 0.0
+                try:
+                    cmd.yaw = math.atan2(cmd.position.y, cmd.position.x)
+                except Exception:
+                    cmd.yaw = 0.0
+                cmd.yaw_dot = 0.0
+                self.controller_body_pub.publish(cmd)
+            except Exception as e:
+                rospy.logwarn_throttle(5.0, f"Aruco direct-drive publish failed: {e}")
+
+            # Check arrival
+            if self._check_aruco_arrival():
+                rospy.loginfo("Arrived near ArUco marker. Marking navigation complete.")
+                self.aruco_target_active = False
+                self.navigation_completed()
+            return
+
             cmd.yaw = math.atan2(dy, dx)
         else:
             # Fallback to waypoint's stored orientation
@@ -777,14 +857,26 @@ class CoreNode:
         if not self.aruco_detections:
             return
 
-        rospy.loginfo("Handling ArUco detection during navigation...")
+        count = len(self.aruco_detections)
+        rospy.loginfo(f"Handling ArUco detection during navigation... count={count}")
 
-        # Stop the vehicle
+        # Case 1: exactly one marker -> go directly without querying VLM
+        if count == 1:
+            self.navigation_active = False
+            try:
+                self.controller_continuous_pub.publish(Twist())
+            except Exception:
+                pass
+            self.navigate_to_aruco(self.aruco_detections[0])
+            return
+
+        # Case 2: multiple markers -> pause and ask VLM which one
         self.navigation_active = False
-        stop_cmd = Twist()
-        self.controller_continuous_pub.publish(stop_cmd)
+        try:
+            self.controller_continuous_pub.publish(Twist())
+        except Exception:
+            pass
 
-        # Query VLM about detected ArUco markers
         if hasattr(self, 'latest_image'):
             query_data = {
                 "type": "vision_query",
@@ -795,7 +887,7 @@ class CoreNode:
                     "y": marker.pose.position.y,
                     "z": marker.pose.position.z
                 }} for marker in self.aruco_detections],
-                "query": "Are there any target objects near these ArUco markers?"
+                "query": "Which ArUco marker corresponds to the navigation target? Please answer JSON with keys 'target_found' (bool) and 'target_aruco_id' (int)."
             }
 
             query_msg = String()
@@ -824,7 +916,8 @@ class CoreNode:
         # If this subtask is the last one, publish final /status=0 after a short delay
         try:
             total = len(self.current_subtasks) if self.current_subtasks else 0
-            if (self.current_subtask_index + 1) >= total:
+            # Only schedule final completion when we actually had subtasks and finished the last one
+            if total > 0 and (self.current_subtask_index + 1) >= total:
                 rospy.Timer(rospy.Duration(2.0), self.final_completion_callback, oneshot=True)
         except Exception:
             pass
@@ -901,16 +994,50 @@ class CoreNode:
         self.navigation_active = True
 
     def navigate_to_aruco(self, marker):
-        """Navigate directly to an ArUco marker using body frame goal (base_link)."""
-        rospy.loginfo(f"Navigating to ArUco marker {marker.id} using body_goal")
+        """Navigate directly to an ArUco marker using body frame goal (base_link).
+        Do NOT immediately publish final status; keep following until within arrival distance.
+        """
+        rospy.loginfo(f"Navigating to ArUco marker {marker.id} using body_goal (direct mode)")
 
-        # Build body-frame PositionCommand
+        # Build initial body-frame PositionCommand
         cmd = PositionCommand()
-        # position: relative to robot base
         cmd.position = marker.pose.position
         cmd.velocity.x = 0.0
         cmd.velocity.y = 0.0
         cmd.velocity.z = 0.0
+        try:
+            cmd.yaw = math.atan2(marker.pose.position.y, marker.pose.position.x)
+        except Exception:
+            cmd.yaw = 0.0
+        cmd.yaw_dot = 0.0
+        # Publish once immediately
+        self.controller_body_pub.publish(cmd)
+
+        # Track target and enable direct-navigation mode
+        self.aruco_target_active = True
+        self.aruco_target_id = marker.id
+        self.aruco_last_pose = marker.pose
+        self.aruco_close_counter = 0
+        # Ensure navigation loop runs
+        self.navigation_active = True
+
+    def _check_aruco_arrival(self):
+        """Check whether we've reached the ArUco target (in body frame)."""
+        if not self.aruco_target_active or not self.aruco_last_pose:
+            return False
+        try:
+            dx = float(self.aruco_last_pose.position.x)
+            dy = float(self.aruco_last_pose.position.y)
+            dist = math.hypot(dx, dy)
+        except Exception:
+            return False
+        # Require being within arrival distance for a few consecutive checks to avoid flicker
+        if dist <= self.aruco_arrival_distance:
+            self.aruco_close_counter += 1
+        else:
+            self.aruco_close_counter = 0
+        return self.aruco_close_counter >= 3
+
         # yaw: relative rotation in body frame to face the target point
         try:
             cmd.yaw = math.atan2(marker.pose.position.y, marker.pose.position.x)

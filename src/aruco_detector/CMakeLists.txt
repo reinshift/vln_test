@@ -12,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   message_generation
   message_runtime
+  magv_vln_msgs
   nav_msgs
   rospy
   sensor_msgs
@@ -52,11 +53,6 @@ find_package(catkin REQUIRED COMPONENTS
 ##   * add every package in MSG_DEP_SET to generate_messages(DEPENDENCIES ...)
 
 ## Generate messages in the 'msg' folder
-add_message_files(
-  FILES
-  ArucoMarker.msg
-  ArucoInfo.msg
-)
 
 ## Generate services in the 'srv' folder
 # add_service_files(
@@ -73,11 +69,6 @@ add_message_files(
 # )
 
 ## Generate added messages and services with any dependencies listed here
-generate_messages(
-  DEPENDENCIES
-  std_msgs
-  geometry_msgs
-)
 
 ################################################
 ## Declare ROS dynamic reconfigure parameters ##
@@ -111,7 +102,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES aruco_detector
-  CATKIN_DEPENDS cv_bridge geometry_msgs message_runtime nav_msgs rospy sensor_msgs std_msgs
+  CATKIN_DEPENDS cv_bridge geometry_msgs message_runtime nav_msgs rospy sensor_msgs std_msgs magv_vln_msgs
 #  DEPENDS system_lib
 )
 

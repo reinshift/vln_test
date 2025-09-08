@@ -23,6 +23,8 @@ add_message_files(
       BoundingBox2D.msg
       Detection2D.msg
       Detection2DArray.msg
+      ArucoMarker.msg
+      ArucoInfo.msg
 )
 
 generate_messages(
