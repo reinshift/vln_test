@@ -641,7 +641,7 @@ class CoreNode:
         values = np.array(self.value_map.data).reshape((self.value_map.info.height, self.value_map.info.width))
 
         # Parameters for path generation
-        num_waypoints = 3
+        num_waypoints = 1
         suppression_radius_pixels = int(0.5 / self.value_map.info.resolution) # 0.5 meters
 
         temp_values = np.copy(values)

@@ -23,9 +23,21 @@ class ArucoDetectorNode:
         rospy.loginfo("ArUco Detector Node Initializing...")
 
         # --- Parameters ---
-        self.marker_size = rospy.get_param('~marker_size', 0.1)  # ArUco码的物理边长 (米)
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
-        self.aruco_params = cv2.aruco.DetectorParameters()
+        self.marker_size = rospy.get_param('~marker_size', 1.0)
+        self.aruco_dict_name = rospy.get_param('~aruco_dictionary', 'DICT_4X4_50')
+        try:
+            dict_id = getattr(cv2.aruco, self.aruco_dict_name)
+        except Exception:
+            rospy.logwarn(f"Unknown aruco dictionary '{self.aruco_dict_name}', fallback to DICT_4X4_1000")
+            self.aruco_dict_name = 'DICT_4X4_50'
+            dict_id = getattr(cv2.aruco, self.aruco_dict_name)
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(dict_id)
+        # 检测参数
+        try:
+            self.aruco_params = cv2.aruco.DetectorParameters()
+        except Exception:
+            # 兼容旧 API
+            self.aruco_params = cv2.aruco.DetectorParameters_create()
 
         # Historical ArUco detection tracking
         self.historical_detections = {}  # {marker_id: [world_positions]}
@@ -66,8 +78,9 @@ class ArucoDetectorNode:
         self.bridge = CvBridge()
 
         # --- ROS Subscribers & Publishers ---
-        # Subscribe to the correct compressed image topic from rosbag
-        self.image_sub = rospy.Subscriber('/magv/camera/image_compressed/compressed', CompressedImage, self.image_callback, queue_size=1)
+        # 订阅图像话题（可参数化），默认 '/magv/camera/image_compressed/compressed'
+        self.image_topic = rospy.get_param('~image_topic', '/magv/camera/image_compressed/compressed')
+        self.image_sub = rospy.Subscriber(self.image_topic, CompressedImage, self.image_callback, queue_size=1)
         self.odom_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
         self.aruco_pub = rospy.Publisher('/aruco_info', ArucoInfo, queue_size=10)
 
@@ -97,79 +110,103 @@ class ArucoDetectorNode:
         rospy.loginfo(f"Added ArUco marker {marker_id} to ignore list at position {world_pos}")
 
     def image_callback(self, msg):
-        if self.latest_odometry is None:
-            rospy.logwarn_throttle(5.0, "No odometry received yet, skipping ArUco detection.")
-            return
-
+        """Handle incoming compressed images, detect ArUco markers, and publish poses.
+        - Works even if odometry is not yet available (publishes in robot base frame).
+        - Uses cv_bridge to decode JPEG to BGR ndarray; falls back to PIL if needed.
+        """
+        # Decode compressed image to OpenCV BGR ndarray
         try:
-            cv_image = Image.open(io.BytesIO(msg.data))
-        except Exception as e:
-            rospy.logerr(f"Failed to decompress image: {e}")
-            return
+            cv_bgr = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e1:
+            try:
+                pil_img = Image.open(io.BytesIO(msg.data)).convert('RGB')
+                cv_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+            except Exception as e2:
+                rospy.logerr(f"Failed to decode compressed image: cv_bridge error={e1}; PIL fallback error={e2}")
+                return
 
-        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(cv_bgr, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
 
+        # Prepare output message
         aruco_info_msg = ArucoInfo()
-        aruco_info_msg.header.stamp = self.latest_odometry.header.stamp
-        aruco_info_msg.header.frame_id = self.latest_odometry.child_frame_id
+        # Prefer image timestamp; fall back to odom timestamp if available
+        stamp = getattr(msg, 'header', None).stamp if hasattr(msg, 'header') else None
+        if stamp is None and self.latest_odometry is not None:
+            stamp = self.latest_odometry.header.stamp
+        aruco_info_msg.header.stamp = stamp if stamp is not None else rospy.Time.now()
 
-        if ids is not None:
+        # Frame: use odom's child frame if available; otherwise fallback to a base frame param
+        self.base_frame_id = getattr(self, 'base_frame_id', rospy.get_param('~base_frame_id', 'base_footprint'))
+        if self.latest_odometry is not None and self.latest_odometry.child_frame_id:
+            aruco_info_msg.header.frame_id = self.latest_odometry.child_frame_id
+        else:
+            aruco_info_msg.header.frame_id = self.base_frame_id
+
+        if ids is None or len(ids) == 0:
+            rospy.loginfo_throttle(5.0, f"No ArUco detected (dict={self.aruco_dict_name}, size={self.marker_size}m, topic={self.image_topic}).")
+            self.aruco_pub.publish(aruco_info_msg)
+            return
+
+        # Estimate marker poses
+        try:
             rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
                 corners, self.marker_size, self.camera_matrix, self.dist_coeffs
             )
+        except Exception as e:
+            rospy.logerr(f"estimatePoseSingleMarkers failed: {e}")
+            self.aruco_pub.publish(aruco_info_msg)
+            return
 
-            for i, marker_id in enumerate(ids):
-                tvec = tvecs[i][0]
-                rvec = rvecs[i][0]
+        # If odom available, precompute world transform once
+        have_odom = self.latest_odometry is not None
+        if have_odom:
+            odom_pose = self.latest_odometry.pose.pose
+            odom_pos = np.array([odom_pose.position.x, odom_pose.position.y, odom_pose.position.z])
+            odom_quat = np.array([odom_pose.orientation.x, odom_pose.orientation.y, odom_pose.orientation.z, odom_pose.orientation.w])
+            T_world_robot = tfs.quaternion_matrix(odom_quat)
+            T_world_robot[:3, 3] = odom_pos
 
-                # Create transformation matrix from Camera to Marker
-                rot_matrix, _ = cv2.Rodrigues(rvec)
-                T_camera_marker = np.eye(4)
-                T_camera_marker[:3, :3] = rot_matrix
-                T_camera_marker[:3, 3] = tvec
+        for i, id_arr in enumerate(ids):
+            marker_id = int(id_arr[0]) if hasattr(id_arr, '__iter__') else int(id_arr)
+            tvec = tvecs[i][0]
+            rvec = rvecs[i][0]
 
-                # Transform marker pose to robot base frame
-                T_robot_marker = np.dot(self.T_robot_camera, T_camera_marker)
+            # Camera->Marker transform
+            rot_matrix, _ = cv2.Rodrigues(rvec)
+            T_camera_marker = np.eye(4)
+            T_camera_marker[:3, :3] = rot_matrix
+            T_camera_marker[:3, 3] = tvec
 
-                # Transform marker pose to world frame using odometry
-                if self.latest_odometry is None:
-                    rospy.logwarn_throttle(5.0, "No odometry received yet, skipping marker processing.")
-                    continue
+            # Robot(base)->Marker transform
+            T_robot_marker = np.dot(self.T_robot_camera, T_camera_marker)
 
-                odom_pose = self.latest_odometry.pose.pose
-                odom_pos = np.array([odom_pose.position.x, odom_pose.position.y, odom_pose.position.z])
-                odom_quat = np.array([odom_pose.orientation.x, odom_pose.orientation.y, odom_pose.orientation.z, odom_pose.orientation.w])
+            # Prepare message in robot base frame (independent of odom)
+            trans_rb = tfs.translation_from_matrix(T_robot_marker)
+            quat_rb = tfs.quaternion_from_matrix(T_robot_marker)
 
-                T_world_robot = tfs.quaternion_matrix(odom_quat)
-                T_world_robot[:3, 3] = odom_pos
+            marker_msg = ArucoMarker()
+            marker_msg.id = marker_id
+            marker_msg.pose.position.x = float(trans_rb[0])
+            marker_msg.pose.position.y = float(trans_rb[1])
+            marker_msg.pose.position.z = float(trans_rb[2])
+            marker_msg.pose.orientation.x = float(quat_rb[0])
+            marker_msg.pose.orientation.y = float(quat_rb[1])
+            marker_msg.pose.orientation.z = float(quat_rb[2])
+            marker_msg.pose.orientation.w = float(quat_rb[3])
 
+            # Deduplication using world pose if odom is available
+            if have_odom:
                 T_world_marker = np.dot(T_world_robot, T_robot_marker)
                 world_pos = tfs.translation_from_matrix(T_world_marker)
-
-                # Check if this marker has been detected before at a similar location
-                if not self.is_duplicate_detection(marker_id[0], world_pos):
-                    # Create ArucoMarker message
-                    marker_msg = ArucoMarker()
-                    marker_msg.id = marker_id[0]
-
-                    trans = tfs.translation_from_matrix(T_robot_marker)
-                    quat = tfs.quaternion_from_matrix(T_robot_marker)
-
-                    marker_msg.pose.position.x = trans[0]
-                    marker_msg.pose.position.y = trans[1]
-                    marker_msg.pose.position.z = trans[2]
-                    marker_msg.pose.orientation.x = quat[0]
-                    marker_msg.pose.orientation.y = quat[1]
-                    marker_msg.pose.orientation.z = quat[2]
-                    marker_msg.pose.orientation.w = quat[3]
-
+                if not self.is_duplicate_detection(marker_id, world_pos):
                     aruco_info_msg.markers.append(marker_msg)
-
-                    # Add to historical detections
-                    self.add_to_history(marker_id[0], world_pos)
+                    self.add_to_history(marker_id, world_pos)
                 else:
-                    rospy.logdebug(f"Skipping duplicate detection of ArUco marker {marker_id[0]}")
+                    rospy.logdebug(f"Skipping duplicate detection of ArUco marker {marker_id}")
+            else:
+                # Without odom, do not apply history-based filtering
+                aruco_info_msg.markers.append(marker_msg)
 
         self.aruco_pub.publish(aruco_info_msg)
 
