@@ -115,6 +115,11 @@ class CoreNode:
         if self.value_smoothing_tau is not None and self.value_smoothing_tau < 0.0:
             self.value_smoothing_tau = 0.0
 
+        # Directional narrow band parameters (for fallback directional guidance)
+        self.dir_band_half_width_m = rospy.get_param('~directional_band_half_width_m', 0.4)
+        self.dir_longitudinal_gain = rospy.get_param('~directional_longitudinal_gain', 10.0)
+        self.dir_lateral_sigma_m = rospy.get_param('~directional_lateral_sigma_m', self.dir_band_half_width_m / 2.0)
+
         # Control timer for navigation
         self.control_timer = rospy.Timer(rospy.Duration(0.1), self.control_timer_callback)
 
@@ -608,14 +613,36 @@ class CoreNode:
             local_x = dx * math.cos(-current_yaw) - dy * math.sin(-current_yaw)
             local_y = dx * math.sin(-current_yaw) + dy * math.cos(-current_yaw)
 
+            # Narrow-band directional preference: reward only a thin strip aligned with the desired axis
+            gain = float(getattr(self, 'dir_longitudinal_gain', 10.0) or 10.0)
+            sigma = float(getattr(self, 'dir_lateral_sigma_m', 0.2) or 0.2)  # lateral Gaussian sigma (m)
+
+            # longitudinal = along desired direction; lateral = perpendicular
             if direction == 'forward':
-                base_value += local_x * 10.0
+                lon = max(0.0, local_x)
+                lat = local_y
             elif direction == 'backward':
-                base_value -= local_x * 10.0
+                lon = max(0.0, -local_x)
+                lat = local_y
             elif direction == 'left':
-                base_value += local_y * 10.0
+                lon = max(0.0, local_y)
+                lat = local_x
             elif direction == 'right':
-                base_value -= local_y * 10.0
+                lon = max(0.0, -local_y)
+                lat = local_x
+            else:
+                lon = max(0.0, local_x)
+                lat = local_y
+
+            # Gaussian weight across the lateral axis to form a narrow strip; cut off beyond ~3 sigma
+            if sigma <= 1e-6:
+                lateral_weight = 1.0 if abs(lat) < 1e-3 else 0.0
+            else:
+                lateral_weight = math.exp(-0.5 * (lat / sigma) * (lat / sigma))
+                if abs(lat) > 3.0 * sigma:
+                    lateral_weight = 0.0
+
+            base_value += gain * lon * lateral_weight
 
         base_value += np.random.normal(0, 1.0)
         return base_value
