@@ -104,6 +104,15 @@ class ArucoDetectorNode:
         self.detection_threshold = rospy.get_param('~detection_threshold', 0.3)  # meters
         self.max_history_size = rospy.get_param('~max_history_size', 10)
 
+        # --- Quality / filtering parameters ---
+        self.enable_id_whitelist = bool(rospy.get_param('~enable_id_whitelist', True))
+        self.id_whitelist = [int(x) for x in rospy.get_param('~id_whitelist', [0])]
+        self.min_side_pixels = float(rospy.get_param('~min_side_pixels', 20.0))
+        self.min_perimeter_pixels = float(rospy.get_param('~min_perimeter_pixels', 120.0))
+        self.max_aspect_ratio = float(rospy.get_param('~max_aspect_ratio', 1.6))  # allow up to 1.6:1
+        self.min_range_m = float(rospy.get_param('~min_range_m', 0.1))
+        self.max_range_m = float(rospy.get_param('~max_range_m', 5.0))
+
         # --- Camera Intrinsics ---
         image_width = rospy.get_param('~image_width', 1080)
         image_height = rospy.get_param('~image_height', 720)
@@ -270,6 +279,29 @@ class ArucoDetectorNode:
             self.aruco_pub.publish(aruco_info_msg)
             return
 
+        # Helper to check marker size/shape in pixels
+        def _passes_shape_quality(corners_px):
+            try:
+                pts = np.array(corners_px, dtype=float).reshape(-1, 2)
+                # side lengths
+                d = [np.linalg.norm(pts[(i+1)%4]-pts[i]) for i in range(4)]
+                perim = sum(d)
+                if perim < self.min_perimeter_pixels:
+                    return False
+                if min(d) < self.min_side_pixels:
+                    return False
+                # aspect ratio via bbox
+                minx, miny = np.min(pts, axis=0)
+                maxx, maxy = np.max(pts, axis=0)
+                w = max(1.0, maxx-minx)
+                h = max(1.0, maxy-miny)
+                ar = max(w/h, h/w)
+                if ar > self.max_aspect_ratio:
+                    return False
+                return True
+            except Exception:
+                return False
+
         # If odom available, precompute world transform once
         have_odom = self.latest_odometry is not None
         if have_odom:
@@ -281,8 +313,33 @@ class ArucoDetectorNode:
 
         for i, id_arr in enumerate(ids):
             marker_id = int(id_arr[0]) if hasattr(id_arr, '__iter__') else int(id_arr)
+
+            # ID whitelist filter (默认仅接受非0且在白名单内，若 enable_id_whitelist=True)
+            if self.enable_id_whitelist and (marker_id not in self.id_whitelist):
+                rospy.loginfo_throttle(2.0, f"Rejecting ArUco id={marker_id} (not in whitelist {self.id_whitelist})")
+                continue
+            # 显式过滤 id==0 的识别
+            if marker_id == 0:
+                rospy.loginfo_throttle(2.0, "Rejecting ArUco id=0 by policy")
+                continue
+
+            # 形状/尺寸质量过滤（像素）
+            try:
+                c4 = corners[i][0]  # shape (4,2)
+                if not _passes_shape_quality(c4):
+                    rospy.loginfo_throttle(2.0, f"Reject id={marker_id} by shape/size quality filter")
+                    continue
+            except Exception:
+                pass
+
             tvec = tvecs[i][0]
             rvec = rvecs[i][0]
+
+            # 距离过滤（米）
+            rng = float(np.linalg.norm(tvec))
+            if not (self.min_range_m <= rng <= self.max_range_m):
+                rospy.loginfo_throttle(2.0, f"Reject id={marker_id} by range filter: {rng:.2f}m")
+                continue
 
             # Camera->Marker transform
             rot_matrix, _ = cv2.Rodrigues(rvec)
