@@ -1,6 +1,8 @@
 build/
 devel/
 .catkin_workspace
+.vscode
 venv310
-
+**/__pycache__/
+**/*.pyc
 **/*.png

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/catkin_ws/venv310/bin/python3
 # -*- coding: utf-8 -*-
 
 import rospy
@@ -6,12 +6,13 @@ import json
 import numpy as np
 import cv2
 import math
+import re
 from threading import Lock
 from collections import deque
 import tf.transformations as tfs
 
 # ROS Messages
-from std_msgs.msg import String, Int32, Bool
+from std_msgs.msg import String, Int32, Bool, Float32MultiArray, MultiArrayDimension
 from nav_msgs.msg import OccupancyGrid, Odometry
 from geometry_msgs.msg import Point, Twist, PoseStamped, Quaternion
 from sensor_msgs.msg import CompressedImage
@@ -21,7 +22,7 @@ from magv_vln_msgs.msg import (
     VehicleStatus, ValueMap, PathPoint, PositionCommand,
     DetectedObjectArray, Detection2DArray
 )
-from aruco_detector.msg import ArucoInfo, ArucoMarker
+from magv_vln_msgs.msg import ArucoInfo, ArucoMarker
 
 class CoreNode:
     def __init__(self):
@@ -32,6 +33,9 @@ class CoreNode:
         self.current_subtasks = []
         self.current_subtask_index = 0
         self.current_subtask = None
+        # Track last seen subtasks/index to avoid resetting during steady NAVIGATION updates
+        self.last_subtasks_json = None
+        self.last_subtask_index = None
         self.occupancy_grid = None
         self.value_map = None
         self.current_path_points = []
@@ -42,17 +46,35 @@ class CoreNode:
         self.navigation_active = False
         self.scan_and_plan_complete = False
         self.task_completed = False
+        self.scan_in_progress = False
+        self.scan_start_time = None
+        self.scan_start_yaw = 0.0
+        self.scan_last_yaw = 0.0
+        self.scan_accum_angle = 0.0
+        self.scan_ctrl_timer = None
         self.current_yaw = 0.0
         self.current_pose = None
+        self.last_odom_time = None
+
+        # ArUco target tracking (direct navigation mode)
+        self.aruco_target_active = False
+        self.aruco_target_id = None
+        self.aruco_last_pose = None  # geometry_msgs/Pose in body frame
+        self.aruco_close_counter = 0
+        self.aruco_arrival_distance = rospy.get_param('~aruco_arrival_distance', 0.3)
 
         # Thread safety
         self.state_lock = Lock()
 
         # Publishers
         self.value_map_pub = rospy.Publisher('/value_map', ValueMap, queue_size=1)
+        self.value_map_preview_pub = rospy.Publisher('/value_map_preview', Float32MultiArray, queue_size=1)
         self.path_point_pub = rospy.Publisher('/path_point', PathPoint, queue_size=10)
         self.controller_discrete_pub = rospy.Publisher('/world_goal', PositionCommand, queue_size=10)
+        self.controller_body_pub = rospy.Publisher('/body_goal', PositionCommand, queue_size=10)
+        # Prefer sending velocity goals to the controller so it can enforce limits
         self.controller_continuous_pub = rospy.Publisher('/magv/omni_drive_controller/cmd_vel', Twist, queue_size=10)
+        self.controller_velocity_pub = rospy.Publisher('/velocity_goal', Twist, queue_size=10)
         self.status_feedback_pub = rospy.Publisher('/core_feedback', String, queue_size=10)
         self.vlm_query_pub = rospy.Publisher('/vlm_query', String, queue_size=10)
         self.final_status_pub = rospy.Publisher('/status', Int32, queue_size=10)
@@ -62,7 +84,8 @@ class CoreNode:
         self.vln_status_sub = rospy.Subscriber('/vln_status', VehicleStatus, self.vln_status_callback, queue_size=1)
         self.occupancy_grid_sub = rospy.Subscriber('/occupancy_grid', OccupancyGrid, self.occupancy_grid_callback, queue_size=1)
         self.aruco_info_sub = rospy.Subscriber('/aruco_info', ArucoInfo, self.aruco_info_callback, queue_size=1)
-        self.image_sub = rospy.Subscriber('/magv/camera/image_compressed', CompressedImage, self.image_callback, queue_size=1)
+        # Subscribe to the correct compressed image topic from rosbag
+        self.image_sub = rospy.Subscriber('/magv/camera/image_compressed/compressed', CompressedImage, self.image_callback, queue_size=1)
         self.vlm_response_sub = rospy.Subscriber('/vlm_response', String, self.vlm_response_callback, queue_size=1)
         self.odometry_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
         self.dino_detections_sub = rospy.Subscriber('/grounding_dino/detections', Detection2DArray, self.dino_detections_callback, queue_size=1)
@@ -73,11 +96,43 @@ class CoreNode:
         self.path_planning_distance = rospy.get_param('~path_planning_distance', 2.0)  # meters
         self.goal_tolerance = rospy.get_param('~goal_tolerance', 0.5)  # meters
         self.aruco_detection_threshold = rospy.get_param('~aruco_detection_threshold', 0.3)  # meters
+        # Use same default caps as controller for consistency
+        self.max_angular_vel = rospy.get_param('~max_angular_vel', 6.28)
+        # Scan duration (seconds)
+        self.scan_duration_sec = rospy.get_param('~scan_duration_sec', 3.0)
+        # Scan yaw alignment tolerance (radians)
+        self.scan_yaw_tolerance = rospy.get_param('~scan_yaw_tolerance', 0.05)
+        # Progress controller gain to match 2π within duration
+        self.scan_progress_kp = rospy.get_param('~scan_progress_kp', 2.0)
+        # Safety timeout factor: stop if scan exceeds duration * factor
+        self.scan_timeout_factor = rospy.get_param('~scan_timeout_factor', 1.7)
+        # Odometry freshness threshold (seconds)
+        self.odom_stale_threshold = rospy.get_param('~odom_stale_threshold', 0.5)
 
         # Camera parameters for projecting detections
         self.image_width = rospy.get_param('~image_width', 1080)
         self.horizontal_fov = rospy.get_param('~horizontal_fov', 2.0) # radians
         self.f_x = (self.image_width / 2.0) / np.tan(self.horizontal_fov / 2.0)
+
+        # Value map smoothing (softmax-like) temperature; 0 disables smoothing
+        try:
+            self.value_smoothing_tau = float(rospy.get_param('~value_smoothing_tau', 0.0))
+        except Exception:
+            self.value_smoothing_tau = 0.0
+        if self.value_smoothing_tau is not None and self.value_smoothing_tau < 0.0:
+            self.value_smoothing_tau = 0.0
+
+        # Directional narrow band parameters (for fallback directional guidance)
+        self.dir_band_half_width_m = rospy.get_param('~directional_band_half_width_m', 0.4)
+        self.dir_longitudinal_gain = rospy.get_param('~directional_longitudinal_gain', 10.0)
+        self.dir_lateral_sigma_m = rospy.get_param('~directional_lateral_sigma_m', self.dir_band_half_width_m / 2.0)
+
+        # Near-obstacle attractor in directional band
+        self.near_obstacle_boost_enable = rospy.get_param('~near_obstacle_boost_enable', True)
+        self.near_obstacle_boost_gain = rospy.get_param('~near_obstacle_boost_gain', 300.0)
+        self.near_obstacle_lateral_min_weight = rospy.get_param('~near_obstacle_lateral_min_weight', 0.1)
+        self.near_obstacle_step_m = rospy.get_param('~near_obstacle_step_m', self.grid_resolution)
+
 
         # Control timer for navigation
         self.control_timer = rospy.Timer(rospy.Duration(0.1), self.control_timer_callback)
@@ -99,11 +154,27 @@ class CoreNode:
             # Parse subtasks if available
             if msg.current_subtask_json:
                 try:
-                    self.current_subtasks = json.loads(msg.current_subtask_json)
-                    self.current_subtask_index = msg.current_subtask_index
-                    if 0 <= self.current_subtask_index < len(self.current_subtasks):
-                        self.current_subtask = self.current_subtasks[self.current_subtask_index]
-                    rospy.loginfo(f"Received subtasks: {len(self.current_subtasks)} tasks, current index: {self.current_subtask_index}")
+                    incoming_json = msg.current_subtask_json
+                    incoming_index = msg.current_subtask_index
+                    # Only refresh/clear when subtasks changed or index advanced
+                    should_reset = (self.last_subtasks_json != incoming_json) or (self.last_subtask_index != incoming_index)
+
+                    if should_reset:
+                        self.current_subtasks = json.loads(incoming_json)
+                        self.current_subtask_index = incoming_index
+                        if 0 <= self.current_subtask_index < len(self.current_subtasks):
+                            self.current_subtask = self.current_subtasks[self.current_subtask_index]
+                        else:
+                            self.current_subtask = None
+                        # Reset scan and plan state only when new subtasks/index detected
+                        self.scan_and_plan_complete = False
+                        self.directional_detections = {}  # Clear previous detections
+                        self.current_path_points = []  # Clear previous path points
+                        self.current_path_index = 0
+                        self.last_subtasks_json = incoming_json
+                        self.last_subtask_index = incoming_index
+                        rospy.loginfo(f"Updated subtasks: {len(self.current_subtasks)} tasks, current index: {self.current_subtask_index}")
+                        rospy.loginfo(f"Current subtask: {self.current_subtask}")
                 except json.JSONDecodeError as e:
                     rospy.logerr(f"Failed to parse subtasks JSON: {e}")
                     return
@@ -134,10 +205,22 @@ class CoreNode:
             return
 
         rospy.loginfo("Starting scan and plan phase...")
+        rospy.loginfo(f"Current subtasks: {self.current_subtasks}")
+        rospy.loginfo(f"Current subtask index: {self.current_subtask_index}")
+        rospy.loginfo(f"Current subtask: {self.current_subtask}")
 
         if not self.current_subtask:
-            rospy.logwarn("No current subtask available for initialization.")
-            return
+            rospy.logerr("No current subtask available for initialization!")
+            rospy.logerr(f"Subtasks list: {self.current_subtasks}")
+            rospy.logerr(f"Subtask index: {self.current_subtask_index}")
+            # Try to proceed with a default subtask to avoid getting stuck
+            if self.current_subtasks and len(self.current_subtasks) > 0:
+                rospy.logwarn("Attempting to use first available subtask...")
+                self.current_subtask = self.current_subtasks[0]
+                self.current_subtask_index = 0
+            else:
+                rospy.logerr("No subtasks available at all! Cannot proceed.")
+                return
 
         # 1. Publish the goal object as a prompt for GroundingDINO
         goal = self.current_subtask.get('goal', None)
@@ -149,15 +232,32 @@ class CoreNode:
         else:
             rospy.loginfo("No specific goal in subtask, will rely on directional guidance.")
 
-        # 2. Command the robot to perform a 360-degree scan
+        # 2. Command the robot to perform a 360-degree scan (only once per subtask)
+        if self.scan_in_progress:
+            rospy.logdebug("Scan already in progress; skip re-triggering rotation.")
+            return
+        self.scan_in_progress = True
+
         rospy.loginfo("Commanding 360-degree rotation for scanning...")
         scan_cmd = Twist()
-        scan_cmd.angular.z = 0.5  # rad/s
-        self.controller_continuous_pub.publish(scan_cmd)
+        scan_cmd.angular.z = self.max_angular_vel
+        try:
+            self.controller_velocity_pub.publish(scan_cmd)
+        except Exception:
+            self.controller_continuous_pub.publish(scan_cmd)
 
-        # 3. Use a timer to stop the scan and trigger planning
-        # A 360-degree turn at 0.5 rad/s takes about 12.6 seconds. Give it 13 seconds.
-        rospy.Timer(rospy.Duration(13.0), self.finish_scan_and_plan, oneshot=True)
+        # 3. Start closed-loop scan control to complete 2π within duration and realign yaw
+        self.scan_start_time = rospy.Time.now()
+        self.scan_start_yaw = self.current_yaw
+        self.scan_last_yaw = self.current_yaw
+        self.scan_accum_angle = 0.0
+        # Create/update control timer (50 Hz)
+        if self.scan_ctrl_timer is not None:
+            try:
+                self.scan_ctrl_timer.shutdown()
+            except Exception:
+                pass
+        self.scan_ctrl_timer = rospy.Timer(rospy.Duration(0.02), self.scan_control_loop)
 
     def finish_scan_and_plan(self, event):
         """
@@ -165,19 +265,117 @@ class CoreNode:
         Stops the robot, computes the map, generates a path, and notifies the state machine.
         """
         rospy.loginfo("Rotation finished. Stopping robot and starting planning.")
+        # Mark scan phase ended
+        self.scan_in_progress = False
+        # Stop scan control timer if running
+        if self.scan_ctrl_timer is not None:
+            try:
+                self.scan_ctrl_timer.shutdown()
+            except Exception:
+                pass
+            self.scan_ctrl_timer = None
 
         # 1. Stop the robot's rotation
         stop_cmd = Twist()
-        self.controller_continuous_pub.publish(stop_cmd)
+        try:
+            self.controller_velocity_pub.publish(stop_cmd)
+        except Exception:
+            self.controller_continuous_pub.publish(stop_cmd)
 
         # Clear the GroundingDINO prompt
         self.dino_prompt_pub.publish(String(data=""))
 
         if self.occupancy_grid is None:
-            rospy.logerr("Cannot plan without an occupancy grid!")
-            # Optionally, you could add logic here to notify the state machine of a failure.
+            rospy.logwarn("Occupancy grid not available yet; will retry planning shortly without re-rotating.")
+            rospy.Timer(rospy.Duration(1.0), self.try_plan_after_grid, oneshot=True)
             return
 
+        # Proceed to planning now that grid is available
+        self._do_plan_and_notify()
+
+    def scan_control_loop(self, event):
+        """Closed-loop control to achieve 2π rotation within scan_duration_sec and realign to start yaw."""
+        if not self.scan_in_progress:
+            return
+        now = rospy.Time.now()
+        elapsed = (now - self.scan_start_time).to_sec() if self.scan_start_time else 0.0
+
+        # Safety timeout
+        if elapsed > self.scan_duration_sec * self.scan_timeout_factor:
+            rospy.logwarn("Scan exceeded safety timeout, forcing stop and planning.")
+            self.finish_scan_and_plan(None)
+            return
+
+        # Determine odometry freshness; if stale, drive purely by time profile and stop at duration
+        odom_stale = (self.last_odom_time is None) or ((now - self.last_odom_time).to_sec() > self.odom_stale_threshold)
+
+        # Update current yaw and accumulated angle
+        current_yaw = self.current_yaw
+        if not odom_stale:
+            dyaw = self.normalize_angle(current_yaw - self.scan_last_yaw)
+            self.scan_accum_angle += abs(dyaw)
+            self.scan_last_yaw = current_yaw
+
+        two_pi = 2.0 * math.pi
+        # Desired progress over time
+        desired_progress = max(0.0, min(two_pi, two_pi * (elapsed / max(1e-3, self.scan_duration_sec))))
+        progress_error = desired_progress - self.scan_accum_angle
+
+        cmd = Twist()
+
+        if elapsed < self.scan_duration_sec:
+            # Feedforward + proportional on progress to match schedule
+            omega_ff = two_pi / max(1e-3, self.scan_duration_sec)
+            if odom_stale:
+                # Without odom, just use feedforward profile
+                omega_cmd = omega_ff
+            else:
+                omega_cmd = omega_ff + self.scan_progress_kp * progress_error
+            # Clamp
+            omega_cmd = max(-self.max_angular_vel, min(self.max_angular_vel, omega_cmd))
+            # Ensure positive rotation direction (counter-clockwise), but allow correction to stay on schedule
+            if omega_cmd < 0.2:
+                omega_cmd = 0.2
+            cmd.angular.z = omega_cmd
+            try:
+                self.controller_velocity_pub.publish(cmd)
+            except Exception:
+                self.controller_continuous_pub.publish(cmd)
+            return
+        else:
+            # If no odom, end scan exactly at duration without alignment
+            if odom_stale:
+                self.finish_scan_and_plan(None)
+                return
+            # Alignment phase: bring yaw back to start yaw within tolerance
+            yaw_err = self.normalize_angle(self.scan_start_yaw - current_yaw)
+            if abs(yaw_err) <= self.scan_yaw_tolerance:
+                self.finish_scan_and_plan(None)
+                return
+            # Proportional correction with clamp and minimum speed
+            omega_c = self.scan_progress_kp * yaw_err
+            max_omega = min(self.max_angular_vel, 1.5)  # limit during alignment
+            min_omega = 0.15
+            if omega_c >= 0:
+                omega_c = max(min_omega, min(max_omega, omega_c))
+            else:
+                omega_c = -max(min_omega, min(max_omega, -omega_c))
+            cmd.angular.z = omega_c
+            try:
+                self.controller_velocity_pub.publish(cmd)
+            except Exception:
+                self.controller_continuous_pub.publish(cmd)
+
+    def try_plan_after_grid(self, event):
+        """Retry planning until occupancy grid arrives; do not restart rotation."""
+        if self.occupancy_grid is None:
+            rospy.logwarn_throttle(5.0, "Waiting for occupancy grid to plan...")
+            rospy.Timer(rospy.Duration(1.0), self.try_plan_after_grid, oneshot=True)
+            return
+        self._do_plan_and_notify()
+
+    def _do_plan_and_notify(self):
+        """Compute value map, generate path, mark complete, and notify state machine."""
         # 2. Compute the value map using the data gathered during the scan
         self.compute_value_map()
 
@@ -202,6 +400,7 @@ class CoreNode:
             orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w
         ])
         self.current_yaw = euler[2]
+        self.last_odom_time = rospy.Time.now()
 
     def dino_detections_callback(self, msg):
         """
@@ -213,7 +412,7 @@ class CoreNode:
             return
 
         for detection in msg.detections:
-            label = detection.label
+            label = (detection.label or '').strip().lower()
             if label not in self.directional_detections:
                 self.directional_detections[label] = []
             # Store the yaw and the full detection message
@@ -287,9 +486,11 @@ class CoreNode:
         direction = 'forward' # Default value
         for key, value in self.current_subtask.items():
             if 'subtask' in key:
-                direction = value
+                direction = (value or '').strip().lower()
                 break
         goal = self.current_subtask.get('goal', None)
+        if isinstance(goal, str):
+            goal = goal.strip().lower() if goal else None
 
         # Get current robot yaw for orientation-aware value calculation
         current_yaw = 0.0
@@ -314,11 +515,66 @@ class CoreNode:
                 value = self.compute_cell_value(world_x, world_y, direction, goal, current_yaw)
                 values[idx] = value
 
+        # Optional value smoothing (softmax-like) excluding obstacles
+        tau = getattr(self, 'value_smoothing_tau', 0.0) or 0.0
+        if tau > 1e-6:
+            try:
+                # mask: True for free cells
+                occ = np.array(self.occupancy_grid.data, dtype=np.int16).reshape((height, width))
+                free_mask = (occ <= 50)
+                vals2d = values.reshape((height, width))
+                # For numerical stability: subtract max over free cells
+                max_free = np.max(vals2d[free_mask]) if np.any(free_mask) else 0.0
+                exp_vals = np.zeros_like(vals2d, dtype=np.float32)
+                exp_vals[free_mask] = np.exp((vals2d[free_mask] - max_free) / tau)
+                # Preserve obstacles as -1000, scale free cells to [0,1] by normalizing softmax weights
+                sum_exp = np.sum(exp_vals[free_mask])
+                if sum_exp > 0:
+                    smoothed = np.full_like(vals2d, -1000.0, dtype=np.float32)
+                    # Convert weights to a value field in [0,1] then rescale back to original dynamic range around max
+                    weights = exp_vals[free_mask] / sum_exp
+                    # Map weights to a comparable scale: use (weights * N) as relative scores (N=free cells count)
+                    N = np.count_nonzero(free_mask)
+                    rel = weights * max(1, N)
+                    smoothed_vals = rel.astype(np.float32)
+                    smoothed[free_mask] = smoothed_vals
+                    values = smoothed.ravel()
+            except Exception as e:
+                rospy.logwarn_throttle(5.0, f"Value smoothing failed: {e}")
+
         value_map.data = values.tolist()
         self.value_map = value_map
         self.value_map_pub.publish(value_map)
 
         rospy.loginfo("Value map computed and published")
+
+        # Also publish a 20x20 preview matrix for quick visualization
+        try:
+            # Reshape to 2D (height, width) for preview sampling
+            values_2d = values.reshape((height, width))
+            preview = self._build_value_map_preview(values_2d, width, height, target_size=20)
+            self.value_map_preview_pub.publish(preview)
+        except Exception as e:
+            rospy.logwarn_throttle(5.0, f"Failed to publish value map preview: {e}")
+
+    def _build_value_map_preview(self, values_np, width, height, target_size=20):
+        """
+        Build a Float32MultiArray preview of size target_size x target_size from the full value map.
+        Uses nearest-neighbor sampling for robustness and speed.
+        """
+        # values_np is a 2D array shaped (height, width)
+        ys = np.linspace(0, height - 1, target_size).astype(int)
+        xs = np.linspace(0, width - 1, target_size).astype(int)
+        sampled = values_np[ys[:, None], xs[None, :]]  # shape (target_size, target_size)
+
+        msg = Float32MultiArray()
+        # Layout: 2D (rows=target_size, cols=target_size), row-major
+        dim_rows = MultiArrayDimension(label='rows', size=target_size, stride=target_size * target_size)
+        dim_cols = MultiArrayDimension(label='cols', size=target_size, stride=target_size)
+        msg.layout.dim = [dim_rows, dim_cols]
+        msg.layout.data_offset = 0
+        msg.data = sampled.astype(np.float32).ravel().tolist()
+        return msg
 
     def compute_cell_value(self, x, y, direction, goal, current_yaw):
         """
@@ -330,8 +586,11 @@ class CoreNode:
         goal_seen = False
 
         # --- Directional Value from Rotational Scan ---
-        if goal and goal in self.directional_detections:
-            cell_angle = math.atan2(y, x)
+        if goal and goal in self.directional_detections and self.current_pose is not None:
+            # Compute angle of the cell relative to robot position (world -> robot-centered)
+            rx = x - self.current_pose.position.x
+            ry = y - self.current_pose.position.y
+            cell_angle = math.atan2(ry, rx)
 
             for (detection_yaw, detection) in self.directional_detections[goal]:
                 # Calculate the angular cone where the object was detected
@@ -359,18 +618,86 @@ class CoreNode:
 
         # --- Fallback: Directional Guidance (if goal was not seen or no goal) ---
         if not goal_seen:
-            # Convert cell position to robot's local frame for directional calculation
-            local_x = x * math.cos(-current_yaw) - y * math.sin(-current_yaw)
-            local_y = x * math.sin(-current_yaw) + y * math.cos(-current_yaw)
+            # Convert world (x,y) to robot local frame around current robot position
+            if self.current_pose is not None:
+                dx = x - self.current_pose.position.x
+                dy = y - self.current_pose.position.y
+            else:
+                dx, dy = x, y
+            local_x = dx * math.cos(-current_yaw) - dy * math.sin(-current_yaw)
+            local_y = dx * math.sin(-current_yaw) + dy * math.cos(-current_yaw)
 
+            # Narrow-band directional preference: reward only a thin strip aligned with the desired axis
+            gain = float(getattr(self, 'dir_longitudinal_gain', 10.0) or 10.0)
+            sigma = float(getattr(self, 'dir_lateral_sigma_m', 0.2) or 0.2)  # lateral Gaussian sigma (m)
+
+            # longitudinal = along desired direction; lateral = perpendicular
             if direction == 'forward':
-                base_value += local_x * 10.0
+                lon = max(0.0, local_x)
+                lat = local_y
             elif direction == 'backward':
-                base_value -= local_x * 10.0
+                lon = max(0.0, -local_x)
+                lat = local_y
             elif direction == 'left':
-                base_value += local_y * 10.0
+                lon = max(0.0, local_y)
+                lat = local_x
             elif direction == 'right':
-                base_value -= local_y * 10.0
+                lon = max(0.0, -local_y)
+                lat = local_x
+            else:
+                lon = max(0.0, local_x)
+                lat = local_y
+
+            # Gaussian weight across the lateral axis to form a narrow strip; cut off beyond ~3 sigma
+            if sigma <= 1e-6:
+                lateral_weight = 1.0 if abs(lat) < 1e-3 else 0.0
+            else:
+                lateral_weight = math.exp(-0.5 * (lat / sigma) * (lat / sigma))
+                if abs(lat) > 3.0 * sigma:
+                    lateral_weight = 0.0
+
+            base_value += gain * lon * lateral_weight
+
+            # Near-obstacle attractor: if the immediate cell ahead along the desired direction is an obstacle,
+            # boost the current free cell to attract the robot to stop before the obstacle within the strip.
+            if getattr(self, 'near_obstacle_boost_enable', True) and lateral_weight >= getattr(self, 'near_obstacle_lateral_min_weight', 0.1):
+                try:
+                    og = self.occupancy_grid
+                    if og is not None:
+                        step = float(getattr(self, 'near_obstacle_step_m', self.grid_resolution) or self.grid_resolution)
+                        ox = og.info.origin.position.x
+                        oy = og.info.origin.position.y
+                        res = og.info.resolution
+                        width = int(og.info.width)
+                        height = int(og.info.height)
+
+                        # Determine unit direction vector in world frame
+                        cy = math.cos(current_yaw)
+                        sy = math.sin(current_yaw)
+                        if direction == 'forward':
+                            ux, uy = cy, sy
+                        elif direction == 'backward':
+                            ux, uy = -cy, -sy
+                        elif direction == 'left':
+                            ux, uy = -sy, cy
+                        elif direction == 'right':
+                            ux, uy = sy, -cy
+                        else:
+                            ux, uy = cy, sy
+
+                        ahead_x = x + step * ux
+                        ahead_y = y + step * uy
+
+                        ix_next = int(math.floor((ahead_x - ox) / res))
+                        iy_next = int(math.floor((ahead_y - oy) / res))
+
+                        if 0 <= ix_next < width and 0 <= iy_next < height:
+                            idx_next = iy_next * width + ix_next
+                            if og.data[idx_next] > 50:
+                                boost = float(getattr(self, 'near_obstacle_boost_gain', 200.0) or 200.0)
+                                base_value += boost * lateral_weight
+                except Exception:
+                    pass
 
         base_value += np.random.normal(0, 1.0)
         return base_value
@@ -383,53 +710,7 @@ class CoreNode:
             angle += 2 * math.pi
         return angle
 
-        # Transform cell coordinates relative to the robot's current position and orientation
-        robot_x = self.current_pose.position.x if self.current_pose else 0
-        robot_y = self.current_pose.position.y if self.current_pose else 0
 
-        # Vector from robot to cell in world frame
-        dx_world = x - robot_x
-        dy_world = y - robot_y
-
-        # Rotate into robot's local frame
-        cos_yaw = math.cos(-current_yaw)
-        sin_yaw = math.sin(-current_yaw)
-        local_x = dx_world * cos_yaw - dy_world * sin_yaw
-        local_y = dx_world * sin_yaw + dy_world * cos_yaw
-
-        # Direction-based value (prefer cells in the desired direction in the robot's frame)
-        if direction == 'forward':
-            base_value += local_x * 10.0  # Prefer positive x (forward) in robot frame
-        elif direction == 'backward':
-            base_value -= local_x * 10.0  # Prefer negative x (backward) in robot frame
-        elif direction == 'left':
-            base_value += local_y * 10.0  # Prefer positive y (left) in robot frame
-        elif direction == 'right':
-            base_value -= local_y * 10.0  # Prefer negative y (right) in robot frame
-
-        # Goal-based value (if a specific goal is mentioned)
-        if goal and goal in self.detected_objects:
-            # Find the closest detected object matching the goal
-            closest_dist_sq = float('inf')
-            closest_pos = None
-            for obj_pos in self.detected_objects[goal]:
-                dist_sq = (x - obj_pos.x)**2 + (y - obj_pos.y)**2
-                if dist_sq < closest_dist_sq:
-                    closest_dist_sq = dist_sq
-                    closest_pos = obj_pos
-
-            # If a matching object is found, create a strong attraction field around it
-            if closest_pos is not None:
-                distance = math.sqrt(closest_dist_sq)
-                # Use a Gaussian-like function to create a strong peak at the object's location
-                attraction_strength = 1000.0
-                attraction_variance = 2.0  # meters
-                base_value += attraction_strength * math.exp(-distance**2 / (2 * attraction_variance**2))
-
-        # Add some randomness to avoid local minima
-        base_value += np.random.normal(0, 1.0)
-
-        return base_value
 
     def generate_path_points(self):
         """Generate path points based on value map"""
@@ -442,7 +723,7 @@ class CoreNode:
         values = np.array(self.value_map.data).reshape((self.value_map.info.height, self.value_map.info.width))
 
         # Parameters for path generation
-        num_waypoints = 5
+        num_waypoints = 1
         suppression_radius_pixels = int(0.5 / self.value_map.info.resolution) # 0.5 meters
 
         temp_values = np.copy(values)
@@ -507,6 +788,10 @@ class CoreNode:
         if not self.navigation_active or not self.current_path_points:
             return
 
+        # Don't execute position control during scanning phase
+        if self.scan_in_progress:
+            return
+
         if self.current_path_index >= len(self.current_path_points):
             # Path completed
             self.navigation_completed()
@@ -520,7 +805,39 @@ class CoreNode:
         cmd.velocity.x = 0.0
         cmd.velocity.y = 0.0
         cmd.velocity.z = 0.0
-        cmd.yaw = self.get_yaw_from_quaternion(current_waypoint.orientation)
+        # Always face the current target waypoint (robot pose -> waypoint)
+        if self.current_pose is not None:
+            dx = current_waypoint.position.x - self.current_pose.position.x
+            dy = current_waypoint.position.y - self.current_pose.position.y
+        # If in ArUco direct-navigation mode, continuously update body_goal until arrival
+        if self.aruco_target_active and self.aruco_last_pose is not None:
+            try:
+                # Use the last seen pose in body frame to build a PositionCommand
+                cmd = PositionCommand()
+                cmd.position = self.aruco_last_pose.position
+                cmd.velocity.x = 0.0
+                cmd.velocity.y = 0.0
+                cmd.velocity.z = 0.0
+                try:
+                    cmd.yaw = math.atan2(cmd.position.y, cmd.position.x)
+                except Exception:
+                    cmd.yaw = 0.0
+                cmd.yaw_dot = 0.0
+                self.controller_body_pub.publish(cmd)
+            except Exception as e:
+                rospy.logwarn_throttle(5.0, f"Aruco direct-drive publish failed: {e}")
+
+            # Check arrival
+            if self._check_aruco_arrival():
+                rospy.loginfo("Arrived near ArUco marker. Marking navigation complete.")
+                self.aruco_target_active = False
+                self.navigation_completed()
+            return
+
+            cmd.yaw = math.atan2(dy, dx)
+        else:
+            # Fallback to waypoint's stored orientation
+            cmd.yaw = self.get_yaw_from_quaternion(current_waypoint.orientation)
         cmd.yaw_dot = 0.0
 
         self.controller_discrete_pub.publish(cmd)
@@ -540,23 +857,37 @@ class CoreNode:
         if not self.aruco_detections:
             return
 
-        rospy.loginfo("Handling ArUco detection during navigation...")
+        count = len(self.aruco_detections)
+        rospy.loginfo(f"Handling ArUco detection during navigation... count={count}")
 
-        # Stop the vehicle
+        # Case 1: exactly one marker -> go directly without querying VLM
+        if count == 1:
+            self.navigation_active = False
+            try:
+                self.controller_continuous_pub.publish(Twist())
+            except Exception:
+                pass
+            self.navigate_to_aruco(self.aruco_detections[0])
+            return
+
+        # Case 2: multiple markers -> pause and ask VLM which one
         self.navigation_active = False
-        stop_cmd = Twist()
-        self.controller_continuous_pub.publish(stop_cmd)
+        try:
+            self.controller_continuous_pub.publish(Twist())
+        except Exception:
+            pass
 
-        # Query VLM about detected ArUco markers
         if hasattr(self, 'latest_image'):
             query_data = {
+                "type": "vision_query",
+                "need_image": True,
                 "image_available": True,
                 "aruco_markers": [{"id": marker.id, "pose": {
                     "x": marker.pose.position.x,
                     "y": marker.pose.position.y,
                     "z": marker.pose.position.z
                 }} for marker in self.aruco_detections],
-                "query": "Are there any target objects near these ArUco markers?"
+                "query": "Which ArUco marker corresponds to the navigation target? Please answer JSON with keys 'target_found' (bool) and 'target_aruco_id' (int)."
             }
 
             query_msg = String()
@@ -568,6 +899,12 @@ class CoreNode:
         rospy.loginfo("Navigation completed!")
         self.navigation_active = False
 
+        # Actively stop the robot to avoid drift after completion
+        try:
+            self.controller_continuous_pub.publish(Twist())
+        except Exception:
+            pass
+
         # Notify state machine
         feedback_msg = String()
         feedback_msg.data = json.dumps({
@@ -576,50 +913,140 @@ class CoreNode:
         })
         self.status_feedback_pub.publish(feedback_msg)
 
+        # If this subtask is the last one, publish final /status=0 after a short delay
+        try:
+            total = len(self.current_subtasks) if self.current_subtasks else 0
+            # Only schedule final completion when we actually had subtasks and finished the last one
+            if total > 0 and (self.current_subtask_index + 1) >= total:
+                rospy.Timer(rospy.Duration(2.0), self.final_completion_callback, oneshot=True)
+        except Exception:
+            pass
+
     def handle_vlm_response(self, response_data):
-        """Handle VLM response about ArUco markers"""
+        """Handle VLM response about ArUco markers with compatibility for 'vision_result' replies."""
         try:
             response = json.loads(response_data)
-            if response.get("target_found", False):
-                # Target found near ArUco marker
-                target_aruco_id = response.get("target_aruco_id")
-                rospy.loginfo(f"Target found near ArUco marker {target_aruco_id}")
-
-                # Navigate directly to the target ArUco marker
-                for marker in self.aruco_detections:
-                    if marker.id == target_aruco_id:
-                        self.navigate_to_aruco(marker)
-                        break
-            else:
-                # No target found, continue navigation
-                rospy.loginfo("No target found near ArUco markers, continuing navigation")
-                self.navigation_active = True
-
         except json.JSONDecodeError as e:
             rospy.logerr(f"Failed to parse VLM response: {e}")
             # Continue navigation on error
             self.navigation_active = True
+            return
+
+        # Primary expected schema
+        if response.get("target_found", False):
+            target_aruco_id = response.get("target_aruco_id")
+            if target_aruco_id is not None:
+                rospy.loginfo(f"Target found near ArUco marker {target_aruco_id}")
+                for marker in self.aruco_detections:
+                    if marker.id == target_aruco_id:
+                        self.navigate_to_aruco(marker)
+                        return
+            # Missing ID: fall back to continue navigation
+            rospy.logwarn("target_found=True but no target_aruco_id provided; continuing navigation")
+            self.navigation_active = True
+            return
+
+        # Compatibility: try infer an ArUco ID from 'vision_result'
+        inferred_id = None
+        try:
+            vr = response.get("vision_result", None)
+            if isinstance(vr, list):
+                text_chunks = []
+                for item in vr:
+                    if isinstance(item, str):
+                        text_chunks.append(item)
+                    elif isinstance(item, dict):
+                        for k in ("id", "marker", "marker_id", "aruco_id"):
+                            if k in item and isinstance(item[k], (int, str)):
+                                text_chunks.append(str(item[k]))
+                    else:
+                        text_chunks.append(str(item))
+                combined = " ".join(text_chunks)
+                if combined:
+                    try:
+                        ids = re.findall(r"\b(\d{1,3})\b", combined)
+                        ids_int = [int(x) for x in ids] if ids else []
+                    except Exception:
+                        ids_int = []
+                    if ids_int:
+                        current_ids = [m.id for m in self.aruco_detections] if self.aruco_detections else []
+                        for cid in ids_int:
+                            if cid in current_ids:
+                                inferred_id = cid
+                                break
+                        if inferred_id is None and len(ids_int) == 1:
+                            inferred_id = ids_int[0]
+            # If still none and exactly one detection present, choose it
+            if inferred_id is None and self.aruco_detections and len(self.aruco_detections) == 1:
+                inferred_id = self.aruco_detections[0].id
+        except Exception as e:
+            rospy.logwarn_throttle(5.0, f"vision_result compatibility parse failed: {e}")
+
+        if inferred_id is not None:
+            rospy.loginfo(f"Inferred target ArUco id {inferred_id} from vision_result; navigating to it")
+            for marker in self.aruco_detections:
+                if marker.id == inferred_id:
+                    self.navigate_to_aruco(marker)
+                    return
+
+        # Default: continue navigation
+        rospy.loginfo("No target found/inferred; continuing navigation")
+        self.navigation_active = True
 
     def navigate_to_aruco(self, marker):
-        """Navigate directly to an ArUco marker"""
-        rospy.loginfo(f"Navigating to ArUco marker {marker.id}")
+        """Navigate directly to an ArUco marker using body frame goal (base_link).
+        Do NOT immediately publish final status; keep following until within arrival distance.
+        """
+        rospy.loginfo(f"Navigating to ArUco marker {marker.id} using body_goal (direct mode)")
 
-        # Create position command to go to ArUco marker
+        # Build initial body-frame PositionCommand
         cmd = PositionCommand()
         cmd.position = marker.pose.position
         cmd.velocity.x = 0.0
         cmd.velocity.y = 0.0
         cmd.velocity.z = 0.0
-        # Calculate yaw to face the marker from the current position
-        if self.current_pose:
-            dx = marker.pose.position.x - self.current_pose.position.x
-            dy = marker.pose.position.y - self.current_pose.position.y
-            cmd.yaw = math.atan2(dy, dx)
+        try:
+            cmd.yaw = math.atan2(marker.pose.position.y, marker.pose.position.x)
+        except Exception:
+            cmd.yaw = 0.0
+        cmd.yaw_dot = 0.0
+        # Publish once immediately
+        self.controller_body_pub.publish(cmd)
+
+        # Track target and enable direct-navigation mode
+        self.aruco_target_active = True
+        self.aruco_target_id = marker.id
+        self.aruco_last_pose = marker.pose
+        self.aruco_close_counter = 0
+        # Ensure navigation loop runs
+        self.navigation_active = True
+
+    def _check_aruco_arrival(self):
+        """Check whether we've reached the ArUco target (in body frame)."""
+        if not self.aruco_target_active or not self.aruco_last_pose:
+            return False
+        try:
+            dx = float(self.aruco_last_pose.position.x)
+            dy = float(self.aruco_last_pose.position.y)
+            dist = math.hypot(dx, dy)
+        except Exception:
+            return False
+        # Require being within arrival distance for a few consecutive checks to avoid flicker
+        if dist <= self.aruco_arrival_distance:
+            self.aruco_close_counter += 1
         else:
-            cmd.yaw = 0.0 # Fallback
+            self.aruco_close_counter = 0
+        return self.aruco_close_counter >= 3
+
+        # yaw: relative rotation in body frame to face the target point
+        try:
+            cmd.yaw = math.atan2(marker.pose.position.y, marker.pose.position.x)
+        except Exception:
+            cmd.yaw = 0.0
         cmd.yaw_dot = 0.0
 
-        self.controller_discrete_pub.publish(cmd)
+        # Publish to body_goal so controller converts to world frame
+        self.controller_body_pub.publish(cmd)
 
         # Set flag that we found the final target
         self.task_completed = True

@@ -6,8 +6,46 @@
     <!-- Parameters -->
     <param name="use_sim_time" value="false"/>
 
+    <!-- Earliest: Instruction Latch Bridge (subscribe ASAP and republish latched) -->
+    <node name="instruction_latch_bridge" pkg="vln_mock" type="instruction_latch_bridge.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
+        <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
+        <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
+        <env name="PYTHONHOME" value="" />
+        <!-- topics are configurable; both default to /instruction -->
+        <param name="input_topic" value="/instruction"/>
+        <param name="output_topic" value="/instruction"/>
+        <!-- optional: warn if no message after N seconds (0 = wait forever) -->
+        <param name="timeout_sec" value="0"/>
+    </node>
+
+    <!-- 第1层：基础感知节点 (优先启动，资源需求低) -->
+    <!-- Pointcloud to Grid Node -->
+    <node name="pointcloud_to_grid_node" pkg="pointcloud_to_grid" type="pointcloud_to_grid_node" output="screen">
+        <param name="cell_size" value="0.1"/>
+        <param name="length_x" value="20.0"/>
+        <param name="length_y" value="20.0"/>
+        <param name="position_x" value="0.0"/>
+        <param name="position_y" value="0.0"/>
+        <param name="intensity_factor" value="1.0"/>
+        <param name="height_factor" value="10.0"/>
+        <param name="cloud_in_topic" value="/magv/scan/3d"/>
+        <!-- Use node default for intensity map topic: /lidargrid_i -->
+        <!-- <param name="mapi_topic_name" value="/lidargrid_i"/> -->
+        <!-- Align intensity grid with core_node subscription -->
+        <param name="mapi_topic_name" value="/occupancy_grid"/>
+        <param name="maph_topic_name" value="/height_grid"/>
+        <!-- Simple Z filter to suppress ground/overhead -->
+        <param name="min_z" value="0.15"/>
+        <param name="max_z" value="1.50"/>
+    </node>
+
     <!-- ArUco Detector Node -->
-    <node name="aruco_detector_node" pkg="aruco_detector" type="aruco_node.py" output="screen">
+    <node name="aruco_detector_node" pkg="aruco_detector" type="aruco_node.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
+        <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
+        <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
+        <env name="PYTHONHOME" value="" />
         <param name="marker_size" value="0.1"/>
         <param name="image_width" value="1080"/>
         <param name="image_height" value="720"/>
@@ -20,60 +58,100 @@
         <param name="max_history_size" value="10"/>
     </node>
 
-    <!-- Instruction Processor (VLM) Node -->
-    <node name="instruction_processor" pkg="llm_model" type="process_ins.py" output="screen">
+    <!-- 第2层：VLM加载节点与指令处理协作节点 -->
+    <node name="vlm_loader" pkg="llm_model" type="vlm_loader.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
+        <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
+        <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
+        <env name="PYTHONHOME" value="" />
+        <!-- 模型路径与生成参数 -->
         <param name="model_path" value="$(find llm_model)/models/Qwen2.5-VL-7B-Instruct"/>
+        <param name="llm_max_new_tokens" value="128"/>
+        <param name="llm_do_sample" value="false"/>
+        <param name="llm_temperature" value="0.7"/>
     </node>
 
-    <!-- Vehicle Status Manager -->
-    <node name="vehicle_status_manager" pkg="vln_mock" type="vehicle_status_manager.py" output="screen">
-        <param name="emergency_stop_distance" value="0.5"/>
+    <node name="ins_processor" pkg="llm_model" type="ins_processor.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
+        <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
+        <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
+        <env name="PYTHONHOME" value="" />
+        <!-- 等待 VLM 从 False->True 的超时时间（秒） -->
+        <param name="wait_vlm_ready_sec" value="20.0"/>
+        <!-- 响应超时时间（秒） -->
+        <!-- 注意：ins_processor 读取参数名为 ~vlm_response_timeout_sec -->
+        <param name="vlm_response_timeout_sec" value="10.0"/>
+        <!-- 可替换系统提示词（包含 few-shot 示例） -->
+        <param name="system_prompt" value="You are a navigation instruction subtask parser. Convert instructions to a JSON array. Each array element is an object with keys: subtask_N (a direction string, one of &quot;forward&quot;, &quot;backward&quot;, &quot;left&quot;, &quot;right&quot;) and goal (a string target or null). Start N from 1 and increment by 1. Respond with JSON only, no extra text.\n\nExamples:\nInstruction: &quot;move forward and stop at the tree&quot;\nOutput: [\n  {&quot;subtask_1&quot;: &quot;forward&quot;, &quot;goal&quot;: &quot;tree&quot;}\n]\n\nInstruction: &quot;head to your right hand side and go to the bench&quot;\nOutput: [\n  {&quot;subtask_1&quot;: &quot;right&quot;, &quot;goal&quot;: null},\n  {&quot;subtask_2&quot;: &quot;forward&quot;, &quot;goal&quot;: &quot;bench&quot;}\n]"/>
     </node>
 
-    <!-- Core Node -->
-    <node name="core_node" pkg="vln_mock" type="core_node.py" output="screen">
-        <param name="grid_resolution" value="0.1"/>
-        <param name="path_planning_distance" value="2.0"/>
-        <param name="goal_tolerance" value="0.5"/>
-        <param name="aruco_detection_threshold" value="0.3"/>
-        <param name="image_width" value="1080"/>
-        <param name="horizontal_fov" value="2.0"/>
+    <!-- 第3层：GroundingDINO (在VLM之后启动) -->
+    <node name="grounding_dino_node" pkg="llm_model" type="grounding_dino_node.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
+        <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
+        <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
+        <env name="PYTHONHOME" value="" />
+        <!-- 显式指定 GroundingDINO 模型路径，便于日志打印与校验 -->
+        <param name="model_path" value="/catkin_ws/src/llm_model/models/GroundingDino/grounding-dino-base"/>
+        <param name="box_threshold" value="0.35"/>
+        <param name="text_threshold" value="0.25"/>
+    </node>
+
+    <!-- 第4层：状态管理和控制节点 -->
+    <node name="vehicle_status_manager" pkg="vln_mock" type="vehicle_status_manager.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
+        <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
+        <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
+        <env name="PYTHONHOME" value="" />
+        <param name="emergency_stop_distance" value="0.2"/>
+    </node>
+
+    <!-- TF Broadcaster (map -> base_footprint and optional alias) -->
+    <node name="odom_tf_broadcaster" pkg="vln_mock" type="odom_tf_broadcaster.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <param name="default_child_frame_id" value="base_footprint"/>
+        <param name="alias_child_frame_id" value="magv/base_link"/>
     </node>
 
     <!-- Controller Node -->
-    <node name="controller" pkg="vln_mock" type="controller.py" output="screen">
+    <node name="controller" pkg="vln_mock" type="controller.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
+        <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
+        <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
+        <env name="PYTHONHOME" value="" />
         <param name="position_kp" value="1.0"/>
         <param name="position_ki" value="0.0"/>
         <param name="position_kd" value="0.1"/>
         <param name="orientation_kp" value="2.0"/>
         <param name="orientation_ki" value="0.0"/>
         <param name="orientation_kd" value="0.1"/>
-        <param name="max_linear_vel" value="1.0"/>
-        <param name="max_angular_vel" value="1.0"/>
+        <!-- Velocity/acceleration limits -->
+        <param name="max_linear_vel" value="1.5"/>
+        <param name="max_angular_vel" value="6.28"/>
+        <param name="max_linear_accel" value="3.0"/>
+        <param name="max_angular_accel" value="6.28"/>
         <param name="position_tolerance" value="0.1"/>
         <param name="orientation_tolerance" value="0.1"/>
         <param name="position_integral_clamp" value="1.0"/>
         <param name="orientation_integral_clamp" value="0.5"/>
     </node>
 
-    <!-- Pointcloud to Grid Node -->
-    <node name="pointcloud_to_grid_node" pkg="pointcloud_to_grid" type="pointcloud_to_grid_node" output="screen">
-        <param name="cell_size" value="0.1"/>
-        <param name="length_x" value="20.0"/>
-        <param name="length_y" value="20.0"/>
-        <param name="position_x" value="0.0"/>
-        <param name="position_y" value="0.0"/>
-        <param name="intensity_factor" value="1.0"/>
-        <param name="height_factor" value="10.0"/>
-        <param name="cloud_in_topic" value="/magv/scan/3d"/>
-        <param name="mapi_topic_name" value="/occupancy_grid"/>
-        <param name="maph_topic_name" value="/height_grid"/>
-    </node>
-
-    <!-- Real GroundingDINO Node -->
-    <node name="grounding_dino_node" pkg="llm_model" type="grounding_dino_node.py" output="screen">
-        <param name="box_threshold" value="0.35"/>
-        <param name="text_threshold" value="0.25"/>
+    <!-- 第5层：核心决策节点 (最后启动，依赖所有其他节点) -->
+    <node name="core_node" pkg="vln_mock" type="core_node.py" output="screen" launch-prefix="bash -c 'exec /catkin_ws/venv310/bin/python3 $0 $@'">
+        <env name="VIRTUAL_ENV" value="/catkin_ws/venv310" />
+        <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
+        <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
+        <env name="PYTHONHOME" value="" />
+        <param name="grid_resolution" value="0.1"/>
+        <param name="path_planning_distance" value="2.0"/>
+        <param name="goal_tolerance" value="0.5"/>
+        <param name="aruco_detection_threshold" value="0.3"/>
+        <param name="image_width" value="1080"/>
+        <param name="horizontal_fov" value="2.0"/>
+        <param name="value_smoothing_tau" value="0.0"/>
+        <!-- Scan behavior -->
+        <param name="max_angular_vel" value="6.28"/>
+        <param name="scan_duration_sec" value="5.0"/>
+        <!-- Occupancy grid is published directly on /occupancy_grid by pointcloud_to_grid_node -->
     </node>
 
     <!-- RViz for visualization (optional) -->

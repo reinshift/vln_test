@@ -3,3 +3,7 @@ llm_model/models/
 
 # pics
 **/*.png
+
+# pycaches
+**/__pycache__/
+**/*.pyc
