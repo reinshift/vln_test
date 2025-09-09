@@ -46,7 +46,9 @@
         <env name="PATH" value="/catkin_ws/venv310/bin:$(env PATH)" />
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
         <env name="PYTHONHOME" value="" />
-        <param name="marker_size" value="0.1"/>
+        <param name="marker_size" value="1.0"/>
+        <param name="marker_id" value="0"/>
+        <param name="image_topic" value="/magv/camera/image_compressed/compressed"/>
         <param name="image_width" value="1080"/>
         <param name="image_height" value="720"/>
         <param name="horizontal_fov" value="2.0"/>
