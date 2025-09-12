@@ -153,6 +153,10 @@
         <!-- Scan behavior -->
         <param name="max_angular_vel" value="6.28"/>
         <param name="scan_duration_sec" value="5.0"/>
+        <!-- Turn-in-place parameters for left/right navigation without object -->
+        <param name="turn_near_sigma_m" value="1.5"/>
+        <!-- DINO detection weight for value map fusion -->
+        <param name="dino_weight" value="0.5"/>
         <!-- Occupancy grid is published directly on /occupancy_grid by pointcloud_to_grid_node -->
     </node>
 
