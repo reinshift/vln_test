@@ -831,10 +831,7 @@ class CoreNode:
         cmd.velocity.x = 0.0
         cmd.velocity.y = 0.0
         cmd.velocity.z = 0.0
-        # Always face the current target waypoint (robot pose -> waypoint)
-        if self.current_pose is not None:
-            dx = current_waypoint.position.x - self.current_pose.position.x
-            dy = current_waypoint.position.y - self.current_pose.position.y
+
         # If in ArUco direct-navigation mode, navigate to a locked world-frame goal only
         if self.aruco_target_active and getattr(self, 'aruco_world_goal', None) is not None:
             # Check arrival to locked world goal
@@ -846,6 +843,10 @@ class CoreNode:
             # While en-route to locked goal, skip normal waypoint publish (controller is already tracking world goal)
             return
 
+        # Always face the current target waypoint (robot pose -> waypoint)
+        if self.current_pose is not None:
+            dx = current_waypoint.position.x - self.current_pose.position.x
+            dy = current_waypoint.position.y - self.current_pose.position.y
             cmd.yaw = math.atan2(dy, dx)
         else:
             # Fallback to waypoint's stored orientation
