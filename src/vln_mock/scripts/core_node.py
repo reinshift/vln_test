@@ -114,6 +114,11 @@ class CoreNode:
         self.image_width = rospy.get_param('~image_width', 1080)
         self.horizontal_fov = rospy.get_param('~horizontal_fov', 2.0) # radians
         self.f_x = (self.image_width / 2.0) / np.tan(self.horizontal_fov / 2.0)
+        # Value fusion weights
+        self.dir_weight = rospy.get_param('~dir_weight', 1.0)
+        self.dino_weight = rospy.get_param('~dino_weight', 0.3)
+        self.dino_value_gain = rospy.get_param('~dino_value_gain', 200.0)
+
 
         # Value map smoothing (softmax-like) temperature; 0 disables smoothing
         try:
@@ -133,6 +138,10 @@ class CoreNode:
         self.near_obstacle_boost_gain = rospy.get_param('~near_obstacle_boost_gain', 300.0)
         self.near_obstacle_lateral_min_weight = rospy.get_param('~near_obstacle_lateral_min_weight', 0.1)
         self.near_obstacle_step_m = rospy.get_param('~near_obstacle_step_m', self.grid_resolution)
+
+        # Turn-in-place preference for left/right with no object: boost near-band points
+        self.turn_near_bonus_gain = rospy.get_param('~turn_near_bonus_gain', self.dir_longitudinal_gain * 2.0)
+        self.turn_near_sigma_m = rospy.get_param('~turn_near_sigma_m', 0.5)
 
 
         # Control timer for navigation
@@ -615,10 +624,13 @@ class CoreNode:
                     distance = math.sqrt(x**2 + y**2)
                     distance_penalty = math.exp(-0.1 * distance) # Prefer closer areas
 
-                    base_value += 500.0 * confidence_bonus * angle_bonus * distance_penalty
+                    # DINO sector score (scaled)
+                    dino_score = self.dino_value_gain * confidence_bonus * angle_bonus * distance_penalty
+                    base_value += self.dino_weight * dino_score
 
         # --- Fallback: Directional Guidance (if goal was not seen or no goal) ---
-        if not goal_seen:
+        # Always compute directional band (was guarded by goal_seen)
+        if True:
             # Convert world (x,y) to robot local frame around current robot position
             if self.current_pose is not None:
                 dx = x - self.current_pose.position.x
@@ -657,7 +669,20 @@ class CoreNode:
                 if abs(lat) > 3.0 * sigma:
                     lateral_weight = 0.0
 
-            base_value += gain * lon * lateral_weight
+            # Base directional score
+            base_dir_score = gain * lon * lateral_weight
+
+            # If it's a lateral-only turn command without object, boost near-band points to encourage in-place turning
+            if (direction in ('left', 'right')) and (goal is None):
+                # distance from robot in local frame
+                local_r = math.hypot(local_x, local_y)
+                # Gaussian near-distance bonus, strongest near the robot (r~0), decays by turn_near_sigma_m
+                near_sigma = float(getattr(self, 'turn_near_sigma_m', 0.5) or 0.5)
+                near_gain = float(getattr(self, 'turn_near_bonus_gain', gain * 2.0) or (gain * 2.0))
+                near_weight = math.exp(-0.5 * (local_r / max(1e-6, near_sigma)) ** 2)
+                base_value += self.dir_weight * (base_dir_score + near_gain * near_weight * lateral_weight)
+            else:
+                base_value += self.dir_weight * base_dir_score
 
             # Near-obstacle attractor: if the immediate cell ahead along the desired direction is an obstacle,
             # boost the current free cell to attract the robot to stop before the obstacle within the strip.

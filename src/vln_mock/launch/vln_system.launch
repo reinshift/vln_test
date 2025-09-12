@@ -79,7 +79,7 @@
         <env name="PYTHONPATH" value="/catkin_ws/venv310/lib/python3.10/site-packages:$(env PYTHONPATH)" />
         <env name="PYTHONHOME" value="" />
         <!-- 等待 VLM 从 False->True 的超时时间（秒） -->
-        <param name="wait_vlm_ready_sec" value="20.0"/>
+        <param name="wait_vlm_ready_sec" value="30.0"/>
         <!-- 响应超时时间（秒） -->
         <!-- 注意：ins_processor 读取参数名为 ~vlm_response_timeout_sec -->
         <param name="vlm_response_timeout_sec" value="10.0"/>

@@ -9,6 +9,12 @@ project(llm_model)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
   rospy
+  std_msgs
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
+  magv_vln_msgs
+  tf
 )
 
 ## System dependencies are found with CMake's conventions
@@ -101,10 +107,7 @@ find_package(catkin REQUIRED COMPONENTS
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-#  INCLUDE_DIRS include
-#  LIBRARIES llm_model
-#  CATKIN_DEPENDS rospy
-#  DEPENDS system_lib
+  CATKIN_DEPENDS rospy std_msgs sensor_msgs nav_msgs geometry_msgs magv_vln_msgs tf
 )
 
 ###########
@@ -158,9 +161,9 @@ include_directories(
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
-  src/vlm_loader.py
-  src/ins_processor.py
-  src/grounding_dino_node.py
+  scripts/vlm_loader.py
+  scripts/ins_processor.py
+  scripts/grounding_dino_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
