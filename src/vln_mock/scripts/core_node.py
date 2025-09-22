@@ -60,6 +60,7 @@ class CoreNode:
         self.aruco_target_active = False
         self.aruco_target_id = None
         self.aruco_last_pose = None  # geometry_msgs/Pose in body frame
+        self.aruco_world_goal = None  # geometry_msgs/Pose in world/map frame (locked target)
         self.aruco_close_counter = 0
         self.aruco_arrival_distance = rospy.get_param('~aruco_arrival_distance', 0.3)
 
@@ -113,6 +114,11 @@ class CoreNode:
         self.image_width = rospy.get_param('~image_width', 1080)
         self.horizontal_fov = rospy.get_param('~horizontal_fov', 2.0) # radians
         self.f_x = (self.image_width / 2.0) / np.tan(self.horizontal_fov / 2.0)
+        # Value fusion weights
+        self.dir_weight = rospy.get_param('~dir_weight', 1.0)
+        self.dino_weight = rospy.get_param('~dino_weight', 0.3)
+        self.dino_value_gain = rospy.get_param('~dino_value_gain', 200.0)
+
 
         # Value map smoothing (softmax-like) temperature; 0 disables smoothing
         try:
@@ -132,6 +138,10 @@ class CoreNode:
         self.near_obstacle_boost_gain = rospy.get_param('~near_obstacle_boost_gain', 300.0)
         self.near_obstacle_lateral_min_weight = rospy.get_param('~near_obstacle_lateral_min_weight', 0.1)
         self.near_obstacle_step_m = rospy.get_param('~near_obstacle_step_m', self.grid_resolution)
+
+        # Turn-in-place preference for left/right with no object: boost near-band points
+        self.turn_near_bonus_gain = rospy.get_param('~turn_near_bonus_gain', self.dir_longitudinal_gain * 2.0)
+        self.turn_near_sigma_m = rospy.get_param('~turn_near_sigma_m', 0.5)
 
 
         # Control timer for navigation
@@ -614,10 +624,13 @@ class CoreNode:
                     distance = math.sqrt(x**2 + y**2)
                     distance_penalty = math.exp(-0.1 * distance) # Prefer closer areas
 
-                    base_value += 500.0 * confidence_bonus * angle_bonus * distance_penalty
+                    # DINO sector score (scaled)
+                    dino_score = self.dino_value_gain * confidence_bonus * angle_bonus * distance_penalty
+                    base_value += self.dino_weight * dino_score
 
         # --- Fallback: Directional Guidance (if goal was not seen or no goal) ---
-        if not goal_seen:
+        # Always compute directional band (was guarded by goal_seen)
+        if True:
             # Convert world (x,y) to robot local frame around current robot position
             if self.current_pose is not None:
                 dx = x - self.current_pose.position.x
@@ -656,7 +669,20 @@ class CoreNode:
                 if abs(lat) > 3.0 * sigma:
                     lateral_weight = 0.0
 
-            base_value += gain * lon * lateral_weight
+            # Base directional score
+            base_dir_score = gain * lon * lateral_weight
+
+            # If it's a lateral-only turn command without object, boost near-band points to encourage in-place turning
+            if (direction in ('left', 'right')) and (goal is None):
+                # distance from robot in local frame
+                local_r = math.hypot(local_x, local_y)
+                # Gaussian near-distance bonus, strongest near the robot (r~0), decays by turn_near_sigma_m
+                near_sigma = float(getattr(self, 'turn_near_sigma_m', 0.5) or 0.5)
+                near_gain = float(getattr(self, 'turn_near_bonus_gain', gain * 2.0) or (gain * 2.0))
+                near_weight = math.exp(-0.5 * (local_r / max(1e-6, near_sigma)) ** 2)
+                base_value += self.dir_weight * (base_dir_score + near_gain * near_weight * lateral_weight)
+            else:
+                base_value += self.dir_weight * base_dir_score
 
             # Near-obstacle attractor: if the immediate cell ahead along the desired direction is an obstacle,
             # boost the current free cell to attract the robot to stop before the obstacle within the strip.
@@ -805,35 +831,22 @@ class CoreNode:
         cmd.velocity.x = 0.0
         cmd.velocity.y = 0.0
         cmd.velocity.z = 0.0
+
+        # If in ArUco direct-navigation mode, navigate to a locked world-frame goal only
+        if self.aruco_target_active and getattr(self, 'aruco_world_goal', None) is not None:
+            # Check arrival to locked world goal
+            if self._check_aruco_arrival():
+                rospy.loginfo("Arrived near ArUco world goal. Marking navigation complete.")
+                self.aruco_target_active = False
+                self.navigation_completed()
+                return
+            # While en-route to locked goal, skip normal waypoint publish (controller is already tracking world goal)
+            return
+
         # Always face the current target waypoint (robot pose -> waypoint)
         if self.current_pose is not None:
             dx = current_waypoint.position.x - self.current_pose.position.x
             dy = current_waypoint.position.y - self.current_pose.position.y
-        # If in ArUco direct-navigation mode, continuously update body_goal until arrival
-        if self.aruco_target_active and self.aruco_last_pose is not None:
-            try:
-                # Use the last seen pose in body frame to build a PositionCommand
-                cmd = PositionCommand()
-                cmd.position = self.aruco_last_pose.position
-                cmd.velocity.x = 0.0
-                cmd.velocity.y = 0.0
-                cmd.velocity.z = 0.0
-                try:
-                    cmd.yaw = math.atan2(cmd.position.y, cmd.position.x)
-                except Exception:
-                    cmd.yaw = 0.0
-                cmd.yaw_dot = 0.0
-                self.controller_body_pub.publish(cmd)
-            except Exception as e:
-                rospy.logwarn_throttle(5.0, f"Aruco direct-drive publish failed: {e}")
-
-            # Check arrival
-            if self._check_aruco_arrival():
-                rospy.loginfo("Arrived near ArUco marker. Marking navigation complete.")
-                self.aruco_target_active = False
-                self.navigation_completed()
-            return
-
             cmd.yaw = math.atan2(dy, dx)
         else:
             # Fallback to waypoint's stored orientation
@@ -860,8 +873,11 @@ class CoreNode:
         count = len(self.aruco_detections)
         rospy.loginfo(f"Handling ArUco detection during navigation... count={count}")
 
-        # Case 1: exactly one marker -> go directly without querying VLM
+        # Case 1: exactly one marker -> if not locked yet, lock and go; otherwise ignore further detections
         if count == 1:
+            if getattr(self, 'aruco_world_goal', None) is not None and self.aruco_target_active:
+                rospy.loginfo_throttle(2.0, "ArUco world goal already locked; ignoring new detections")
+                return
             self.navigation_active = False
             try:
                 self.controller_continuous_pub.publish(Twist())
@@ -934,6 +950,10 @@ class CoreNode:
 
         # Primary expected schema
         if response.get("target_found", False):
+            # If already locked, ignore further VLM selection
+            if getattr(self, 'aruco_world_goal', None) is not None and self.aruco_target_active:
+                rospy.loginfo("ArUco world goal already locked; ignoring VLM target selection")
+                return
             target_aruco_id = response.get("target_aruco_id")
             if target_aruco_id is not None:
                 rospy.loginfo(f"Target found near ArUco marker {target_aruco_id}")
@@ -994,49 +1014,85 @@ class CoreNode:
         self.navigation_active = True
 
     def navigate_to_aruco(self, marker):
-        """Navigate directly to an ArUco marker using body frame goal (base_link).
-        Do NOT immediately publish final status; keep following until within arrival distance.
+        """Lock an ArUco world-frame goal computed from the current odometry + one detection,
+        publish it once to the controller, and stop consuming further detections for this target.
         """
-        rospy.loginfo(f"Navigating to ArUco marker {marker.id} using body_goal (direct mode)")
+        rospy.loginfo(f"Navigating to ArUco marker {marker.id} using locked world goal")
 
-        # Build initial body-frame PositionCommand
+        # 1) Convert the provided body-frame marker pose into world/map frame using current odom
+        if self.current_pose is None:
+            rospy.logwarn("No current pose available; cannot lock ArUco world goal")
+            return
+        try:
+            bx = float(marker.pose.position.x)
+            by = float(marker.pose.position.y)
+            bz = float(marker.pose.position.z)
+        except Exception:
+            rospy.logwarn("Invalid ArUco pose; cannot lock goal")
+            return
+
+        # Current robot world pose
+        rx = float(self.current_pose.position.x)
+        ry = float(self.current_pose.position.y)
+        try:
+            yaw = self.get_yaw_from_quaternion(self.current_pose.orientation)
+        except Exception:
+            yaw = 0.0
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+        # Body -> World
+        wx = rx + (bx * cos_y - by * sin_y)
+        wy = ry + (bx * sin_y + by * cos_y)
+        wz = self.current_pose.position.z + bz
+
+        # 2) Build world-frame PositionCommand once
         cmd = PositionCommand()
-        cmd.position = marker.pose.position
+        cmd.position.x = wx
+        cmd.position.y = wy
+        cmd.position.z = wz
+        # Face the target point
+        cmd.yaw = math.atan2(wy - ry, wx - rx)
+        cmd.yaw_dot = 0.0
         cmd.velocity.x = 0.0
         cmd.velocity.y = 0.0
         cmd.velocity.z = 0.0
-        try:
-            cmd.yaw = math.atan2(marker.pose.position.y, marker.pose.position.x)
-        except Exception:
-            cmd.yaw = 0.0
-        cmd.yaw_dot = 0.0
-        # Publish once immediately
-        self.controller_body_pub.publish(cmd)
+        # Publish to world goal
+        self.controller_discrete_pub.publish(cmd)
 
-        # Track target and enable direct-navigation mode
+        # 3) Save locked goal and arm target-active mode
+        self.aruco_world_goal = type(self.current_pose)()  # geometry_msgs/Pose compatible
+        self.aruco_world_goal.position.x = wx
+        self.aruco_world_goal.position.y = wy
+        self.aruco_world_goal.position.z = wz
+        # Set orientation toward the goal
+        q = tfs.quaternion_from_euler(0.0, 0.0, cmd.yaw)
+        self.aruco_world_goal.orientation.x = q[0]
+        self.aruco_world_goal.orientation.y = q[1]
+        self.aruco_world_goal.orientation.z = q[2]
+        self.aruco_world_goal.orientation.w = q[3]
+
         self.aruco_target_active = True
         self.aruco_target_id = marker.id
-        self.aruco_last_pose = marker.pose
+        self.aruco_last_pose = None  # Stop using body-frame updates
         self.aruco_close_counter = 0
-        # Ensure navigation loop runs
         self.navigation_active = True
 
     def _check_aruco_arrival(self):
-        """Check whether we've reached the ArUco target (in body frame)."""
-        if not self.aruco_target_active or not self.aruco_last_pose:
+        """Check whether we've reached the locked ArUco world goal."""
+        if not self.aruco_target_active or getattr(self, 'aruco_world_goal', None) is None or self.current_pose is None:
             return False
         try:
-            dx = float(self.aruco_last_pose.position.x)
-            dy = float(self.aruco_last_pose.position.y)
+            dx = float(self.aruco_world_goal.position.x) - float(self.current_pose.position.x)
+            dy = float(self.aruco_world_goal.position.y) - float(self.current_pose.position.y)
             dist = math.hypot(dx, dy)
         except Exception:
             return False
-        # Require being within arrival distance for a few consecutive checks to avoid flicker
         if dist <= self.aruco_arrival_distance:
             self.aruco_close_counter += 1
         else:
             self.aruco_close_counter = 0
-        return self.aruco_close_counter >= 3
+        # Require fewer consecutive checks since goal is fixed
+        return self.aruco_close_counter >= 2
 
         # yaw: relative rotation in body frame to face the target point
         try:

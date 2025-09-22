@@ -7,16 +7,14 @@
   <license>TODO</license>
 
   <buildtool_depend>catkin</buildtool_depend>
-  <depend>roscpp</depend>
   <depend>rospy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
-  <depend>actionlib</depend>
+  <depend>tf</depend>
+  <depend>tf2_ros</depend>
   <depend>magv_vln_msgs</depend>
-  <depend>pcl_conversions</depend>
-  <depend>pcl_ros</depend>
 
   <export>
   </export>

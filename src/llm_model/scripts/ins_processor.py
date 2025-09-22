@@ -206,9 +206,16 @@ class InstructionProcessorLite:
                 subtasks = self._extract_json(text)
         if not isinstance(subtasks, list):
             subtasks = []
+
+        # Filter out forward-without-object subtasks per requirement
+        filtered = self._filter_forward_none(subtasks)
+        if len(filtered) != len(subtasks):
+            self._log('INFO', f'Filtered forward-without-goal subtasks: {len(subtasks) - len(filtered)} removed')
+        subtasks = filtered
+
         if len(subtasks) == 0:
             # Do not publish empty subtasks; log and clear pending to avoid soft-deadlock
-            self._log('WARNING', 'Empty subtasks parsed; not publishing /subtasks (clearing pending)')
+            self._log('WARNING', 'Empty subtasks parsed after filtering; not publishing /subtasks (clearing pending)')
             self._clear_pending()
             return
 
@@ -227,6 +234,44 @@ class InstructionProcessorLite:
             return json.loads(m.group(0))
         except Exception:
             return []
+
+    def _filter_forward_none(self, subtasks):
+        """
+        过滤掉：方向为 'forward' 且 object/goal 为空(None/""/"null") 的子任务。
+        兼容多种字段：
+          - 方向键：任一包含 'subtask' 的键，或 'direction'
+          - 目标键：'goal' 或 'object'
+        """
+        def _get_dir_and_goal(item):
+            if not isinstance(item, dict):
+                return None, None
+            # direction
+            direction = None
+            for k, v in item.items():
+                if isinstance(k, str) and 'subtask' in k.lower():
+                    direction = str(v).strip().lower() if v is not None else None
+                    break
+            if direction is None:
+                v = item.get('direction')
+                direction = str(v).strip().lower() if v is not None else None
+            # goal/object
+            goal = item.get('goal')
+            if goal is None and 'object' in item:
+                goal = item.get('object')
+            # Normalize textual nulls
+            if isinstance(goal, str):
+                g = goal.strip().lower()
+                if g in ('', 'null', 'none', 'nil'):  # treat as None
+                    goal = None
+            return direction, goal
+
+        out = []
+        for it in subtasks:
+            direction, goal = _get_dir_and_goal(it)
+            if direction == 'forward' and goal is None:
+                continue
+            out.append(it)
+        return out
 
     def _start_response_timer(self):
         # cancel existing timer

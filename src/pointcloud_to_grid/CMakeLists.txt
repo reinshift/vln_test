@@ -24,7 +24,6 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_geometry_msgs
   tf2_sensor_msgs
 )
-find_package(OpenCV REQUIRED)
 
 
 ## Generate dynamic reconfigure parameters in the 'cfg' folder
@@ -34,9 +33,7 @@ generate_dynamic_reconfigure_options(
 
 catkin_package(
   INCLUDE_DIRS include
-  #LIBRARIES pointcloud_to_grid
-  #CATKIN_DEPENDS dynamic_reconfigure nav_msgs pcl_ros roscpp
-  #DEPENDS roscpp std_msgs
+  CATKIN_DEPENDS dynamic_reconfigure sensor_msgs nav_msgs pcl_ros roscpp tf2 tf2_ros tf2_geometry_msgs tf2_sensor_msgs
 )
 
 
@@ -52,5 +49,5 @@ add_definitions(${PCL_DEFINITIONS})
 
 add_executable(pointcloud_to_grid_node src/pointcloud_to_grid_node.cpp)
 add_dependencies(pointcloud_to_grid_node ${PROJECT_NAME}_gencfg)
-target_link_libraries(pointcloud_to_grid_node ${catkin_LIBRARIES} ${OpenCV_LIBS} ${PCL_LIBRARIES})
+target_link_libraries(pointcloud_to_grid_node ${catkin_LIBRARIES} ${PCL_LIBRARIES})
 
