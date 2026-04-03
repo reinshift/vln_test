@@ -1,4 +1,4 @@
-#!/catkin_ws/venv310/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import rospy
@@ -24,6 +24,14 @@ class VehicleStatusManager:
     def __init__(self):
         rospy.init_node('vehicle_status_manager', anonymous=True)
         rospy.loginfo("Vehicle Status Manager initializing...")
+
+        self.cmd_vel_topic = rospy.get_param('~cmd_vel_topic', '/magv/omni_drive_controller/cmd_vel')
+        self.odometry_topic = rospy.get_param('~odometry_topic', '/magv/odometry/gt')
+        self.pointcloud_topic = rospy.get_param('~pointcloud_topic', '/magv/scan/3d')
+        self.world_goal_topic = rospy.get_param('~world_goal_topic', '/world_goal')
+        self.subtasks_topic = rospy.get_param('~subtasks_topic', '/subtasks')
+        self.core_feedback_topic = rospy.get_param('~core_feedback_topic', '/core_feedback')
+        self.vln_status_topic = rospy.get_param('~vln_status_topic', '/vln_status')
 
         # State variables
         self.current_state = VehicleStatus.STATE_IDLE
@@ -54,22 +62,23 @@ class VehicleStatusManager:
 
         self.forward_points_count = 0
         self.last_pc_frame = ''
+        self.last_es_reason = 'ok'
 
         # Thread safety
         self.state_lock = Lock()
 
         # Publishers
-        self.status_pub = rospy.Publisher('/vln_status', VehicleStatus, queue_size=10)
-        self.emergency_stop_pub = rospy.Publisher('/magv/omni_drive_controller/cmd_vel', Twist, queue_size=1)
+        self.status_pub = rospy.Publisher(self.vln_status_topic, VehicleStatus, queue_size=10)
+        self.emergency_stop_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=1)
 
         # Subscribers
-        self.subtasks_sub = rospy.Subscriber('/subtasks', String, self.subtasks_callback, queue_size=1)
-        self.core_feedback_sub = rospy.Subscriber('/core_feedback', String, self.core_feedback_callback, queue_size=1)
-        self.odometry_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
-        self.pointcloud_sub = rospy.Subscriber('/magv/scan/3d', PointCloud2, self.pointcloud_callback, queue_size=1)
-        self.cmd_vel_sub = rospy.Subscriber('/magv/omni_drive_controller/cmd_vel', Twist, self.cmd_vel_callback, queue_size=1)
+        self.subtasks_sub = rospy.Subscriber(self.subtasks_topic, String, self.subtasks_callback, queue_size=1)
+        self.core_feedback_sub = rospy.Subscriber(self.core_feedback_topic, String, self.core_feedback_callback, queue_size=1)
+        self.odometry_sub = rospy.Subscriber(self.odometry_topic, Odometry, self.odometry_callback, queue_size=1)
+        self.pointcloud_sub = rospy.Subscriber(self.pointcloud_topic, PointCloud2, self.pointcloud_callback, queue_size=1)
+        self.cmd_vel_sub = rospy.Subscriber(self.cmd_vel_topic, Twist, self.cmd_vel_callback, queue_size=1)
         # Subscribe to latest goal to reflect in status.target_position
-        self.world_goal_sub = rospy.Subscriber('/world_goal', PositionCommand, self.world_goal_callback, queue_size=1)
+        self.world_goal_sub = rospy.Subscriber(self.world_goal_topic, PositionCommand, self.world_goal_callback, queue_size=1)
 
         # Current position / target
         self.current_position = Point()
@@ -77,7 +86,9 @@ class VehicleStatusManager:
         self.odometry_frame_id = "map"  # Default frame_id
 
         # TF buffer/listener and base frame
-        self.base_frame = rospy.get_param('~base_frame', 'magv/base_link')
+        self.base_frame = rospy.get_param('~base_frame', 'base_footprint')
+        self.es_require_valid_tf = bool(rospy.get_param('~es_require_valid_tf', True))
+        self.es_tf_fail_stop = bool(rospy.get_param('~es_tf_fail_stop', True))
         self.tf_buffer = tf2_ros.Buffer(rospy.Duration(10.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
@@ -167,6 +178,7 @@ class VehicleStatusManager:
         # Lookup transform from pointcloud frame to base frame (for forward corridor check)
         src_frame = msg.header.frame_id if hasattr(msg, 'header') else ''
         T = None
+        tf_valid = (not src_frame) or (src_frame == self.base_frame)
         if src_frame and src_frame != self.base_frame:
             try:
                 if self.tf_buffer.can_transform(self.base_frame, src_frame, msg.header.stamp, rospy.Duration(0.05)):
@@ -181,9 +193,23 @@ class VehicleStatusManager:
                 M[1, 3] = t.y
                 M[2, 3] = t.z
                 T = M
+                tf_valid = True
             except Exception as e:
                 rospy.logwarn_throttle(5.0, "ES: TF lookup %s->%s failed: %s", src_frame, self.base_frame, str(e))
                 T = None
+                tf_valid = False
+
+        if not tf_valid and self.es_require_valid_tf:
+            self.last_es_reason = 'tf_unavailable'
+            if self.es_tf_fail_stop and (abs(self.current_velocity.linear.x) >= 0.1 or abs(self.current_velocity.linear.y) >= 0.1):
+                if not self.emergency_stop_active:
+                    rospy.logwarn("Emergency Stop Triggered: no valid TF from %s to %s for obstacle check",
+                                  src_frame, self.base_frame)
+                self.emergency_stop_active = True
+                self.current_state = VehicleStatus.STATE_EMERGENCY_STOP
+                self.emergency_stop_pub.publish(Twist())
+            return
+        self.last_es_reason = 'ok'
 
         # Only check for obstacles if the robot has some translational velocity
         if abs(self.current_velocity.linear.x) < 0.1 and abs(self.current_velocity.linear.y) < 0.1:
@@ -303,7 +329,8 @@ class VehicleStatusManager:
             status_msg.diagnostic_info = (
                 f"{extra} | pc_frame={self.last_pc_frame} base_frame={self.base_frame} min_all={nearest_all}m min_forward_x={nearest_fwd}m "
                 f"fwd_count={self.forward_points_count} es_dist={self.emergency_stop_distance:.2f} es_half={self.emergency_stop_half_width:.2f} "
-                f"min_range={self.es_min_range:.2f} min_pts={self.es_min_points} hit_stk={self._es_hit_streak} clr_stk={self._es_clear_streak}"
+                f"min_range={self.es_min_range:.2f} min_pts={self.es_min_points} hit_stk={self._es_hit_streak} clr_stk={self._es_clear_streak} "
+                f"es_reason={self.last_es_reason}"
             )
 
             self.status_pub.publish(status_msg)

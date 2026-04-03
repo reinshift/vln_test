@@ -1,134 +1,250 @@
-#!/catkin_ws/venv310/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import os
 import re
-import json
-import math
-import rospy
+import threading
+import time
 import uuid
-from std_msgs.msg import String as StringMsg, Bool
-from sensor_msgs.msg import CompressedImage
-from PIL import Image as PILImage
+from pathlib import Path
+
 import numpy as np
+import rospy
+from PIL import Image as PILImage
+from sensor_msgs.msg import CompressedImage
+from std_msgs.msg import Bool, String as StringMsg
+
+os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
+
 
 class VLMModelLoaderNode:
     """
-    仅负责：
-    - 启动时加载 VLM（模型与处理器）
+    职责：
+    - 启动时加载可用的视觉/多模态模型
     - 加载成功后在 /VLM_Status 发布 True（latched）
-    - 订阅 /vlm_query，处理文本或图文请求，发布到 /vlm_response（携带 request_id 回传）
-    - 可选订阅摄像头图像（compressed），以便图文推理
+    - 订阅 /vlm_query，处理文本或图文请求，发布到 /vlm_response
+    - 当模型不可用时，为文本解析和简单视觉路由提供安全降级
     """
+
     def __init__(self):
-        # Publishers (latched True once loaded)
         self.status_pub = rospy.Publisher('/VLM_Status', Bool, queue_size=1, latch=True)
         self.vlm_response_pub = rospy.Publisher('/vlm_response', StringMsg, queue_size=10)
         self.error_log_pub = rospy.Publisher('/vlm_error_log', StringMsg, queue_size=10)
 
-        # Subscribers
         self.vlm_query_sub = rospy.Subscriber('/vlm_query', StringMsg, self._on_vlm_query, queue_size=10)
-        self.image_sub = rospy.Subscriber('/magv/camera/image_compressed/compressed', CompressedImage, self._on_image, queue_size=1)
+        self.image_sub = None
 
-        # State
         self._model = None
         self._processor = None
+        self._torch = None
+        self._device = 'cpu'
+        self._torch_dtype = None
+        self.backend = 'offline'
         self.model_loaded = False
         self.last_error_message = None
         self.latest_cv_image = None
 
-        # Params
-        self.model_path = rospy.get_param('~model_path', os.path.join(os.path.dirname(__file__), '..', 'models', 'Qwen2.5-VL-7B-Instruct'))
-        self.load_delay_sec = float(rospy.get_param('~load_delay_sec', 1.0))
+        self.requested_backend = str(rospy.get_param('~backend', 'auto')).strip().lower()
+        self.model_path = str(rospy.get_param('~model_path', '')).strip()
+        self.default_florence_model_path = str(
+            rospy.get_param(
+                '~default_florence_model_path',
+                os.path.join(os.path.dirname(__file__), '..', 'models', 'microsoft--Florence-2-large'),
+            )
+        ).strip()
+        self.image_topic = str(rospy.get_param('~image_topic', '/magv/camera/image_compressed/compressed')).strip()
+        self.load_delay_sec = float(rospy.get_param('~load_delay_sec', 0.5))
+        self.publish_ready_without_model = bool(rospy.get_param('~publish_ready_without_model', False))
 
-        # Delay load to avoid blocking init
-        rospy.Timer(rospy.Duration(self.load_delay_sec), self._delayed_model_loading, oneshot=True)
+        self.image_sub = rospy.Subscriber(self.image_topic, CompressedImage, self._on_image, queue_size=1)
+        self._schedule_model_loading()
         rospy.loginfo('VLM Loader initialized. Scheduling model load...')
 
     def _log_error(self, level, message):
         import datetime
+
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-        log_msg = f"[{timestamp}] [{level}] VLM_LOADER: {message}"
+        log_msg = f'[{timestamp}] [{level}] VLM_LOADER: {message}'
         self.error_log_pub.publish(StringMsg(data=log_msg))
 
     def _on_image(self, msg: CompressedImage):
         try:
             import cv2
+
             np_arr = np.frombuffer(msg.data, np.uint8)
             cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if cv_image is not None:
                 self.latest_cv_image = cv_image
         except Exception as e:
-            rospy.logerr(f"VLM Loader: Failed to decode compressed image: {e}")
+            rospy.logerr(f'VLM Loader: Failed to decode compressed image: {e}')
 
-    def _delayed_model_loading(self, _):
+    def _schedule_model_loading(self):
+        threading.Thread(target=self._load_model_after_delay, daemon=True).start()
+
+    def _load_model_after_delay(self):
+        if self.load_delay_sec > 0:
+            time.sleep(self.load_delay_sec)
+        if rospy.is_shutdown():
+            return
+        self._delayed_model_loading()
+
+    def _delayed_model_loading(self):
         rospy.loginfo('VLM Loader: starting model loading...')
         try:
             self._load_model()
             self.model_loaded = True
             self.last_error_message = None
-            rospy.loginfo('VLM Loader: model loaded successfully.')
-            self._log_error('SUCCESS', 'Model loaded successfully')
-            # Publish latched True exactly once
+            self._log_error('SUCCESS', f'Model loaded successfully (backend={self.backend})')
             self.status_pub.publish(Bool(data=True))
         except Exception as e:
             self.model_loaded = False
             self.last_error_message = str(e)
+            self.backend = 'offline'
             rospy.logerr(f'VLM Loader: model load failed: {e}')
             self._log_error('ERROR', f'Model load failed: {e}')
-            # 发布 False 以明确状态（非 latched True）——这里不发布，以免卡住旧订阅者；仅在成功时发布 True
+            if self.publish_ready_without_model:
+                self._log_error('WARNING', 'Publishing ready=True with offline-only fallback enabled')
+                self.status_pub.publish(Bool(data=True))
+
+    def _detect_model_type(self, model_dir):
+        cfg_path = Path(model_dir) / 'config.json'
+        if not cfg_path.exists():
+            return ''
+        try:
+            cfg = json.loads(cfg_path.read_text())
+        except Exception:
+            return ''
+        model_type = str(cfg.get('model_type', '')).strip().lower()
+        if model_type:
+            return model_type
+        archs = [str(x).lower() for x in cfg.get('architectures', [])]
+        if any('florence' in x for x in archs):
+            return 'florence2'
+        if any('qwen2_5_vl' in x or 'qwen2vl' in x or 'qwen2_vl' in x for x in archs):
+            return 'qwen2_5_vl'
+        return ''
+
+    def _resolve_backend_and_path(self):
+        candidates = []
+        if self.model_path:
+            candidates.append(self.model_path)
+        if self.default_florence_model_path and self.default_florence_model_path not in candidates:
+            candidates.append(self.default_florence_model_path)
+
+        existing = []
+        for path in candidates:
+            if path and os.path.isdir(path):
+                existing.append(path)
+
+        if self.requested_backend in ('qwen', 'qwen2', 'qwen2_5_vl', 'qwen2_vl'):
+            for path in existing:
+                if 'qwen' in self._detect_model_type(path):
+                    return 'qwen', path
+            raise RuntimeError(f'No local Qwen-VL model found. candidates={candidates}')
+
+        if self.requested_backend in ('florence', 'florence2'):
+            for path in existing:
+                if self._detect_model_type(path) == 'florence2':
+                    return 'florence2', path
+            raise RuntimeError(f'No local Florence-2 model found. candidates={candidates}')
+
+        for path in existing:
+            mtype = self._detect_model_type(path)
+            if 'qwen' in mtype:
+                return 'qwen', path
+        for path in existing:
+            if self._detect_model_type(path) == 'florence2':
+                return 'florence2', path
+
+        raise RuntimeError(f'No supported local VLM model found. candidates={candidates}')
 
     def _load_model(self):
-        # Import deps lazily
         self._log_error('INFO', 'Importing ML dependencies...')
         try:
             import torch
-            import safetensors
-            import transformers
-            # generation utils warmup
-            try:
-                import transformers.generation.utils as _gen_utils  # noqa: F401
-            except Exception as ge:
-                self._log_error('WARNING', f'Pre-import transformers.generation.utils failed: {ge}')
-
-            # Prefer Qwen2.5-VL API, fallback to Qwen2-VL
-            try:
-                from transformers.models.qwen2_5_vl import (
-                    Qwen2_5_VLProcessor as AutoProcessor,
-                    Qwen2_5_VLForConditionalGeneration,
-                )
-                model_api = 'qwen2_5_vl'
-            except Exception:
-                from transformers.models.qwen2_vl import (
-                    Qwen2VLProcessor as AutoProcessor,
-                    Qwen2VLForConditionalGeneration as Qwen2_5_VLForConditionalGeneration,
-                )
-                model_api = 'qwen2_vl'
-            self._log_error('INFO', f'Using transformers API: {model_api}')
+            import transformers  # noqa: F401
         except Exception as e:
             raise RuntimeError(f'ML deps import failed: {e}')
 
-        model_dir = self.model_path
-        if not os.path.exists(model_dir):
-            raise RuntimeError(f'Model directory not found: {model_dir}')
+        self._torch = torch
+        self._device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self._torch_dtype = torch.float16 if self._device == 'cuda' else torch.float32
+        backend, model_dir = self._resolve_backend_and_path()
+        self.backend = backend
+        self.model_path = model_dir
 
-        import torch  # type: ignore
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        torch_dtype = torch.float16 if device == 'cuda' else torch.float32
-        self._processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
+        if backend == 'qwen':
+            self._load_qwen_model(model_dir)
+        elif backend == 'florence2':
+            self._load_florence_model(model_dir)
+        else:
+            raise RuntimeError(f'Unsupported backend resolved: {backend}')
+
+    def _accelerate_available(self):
+        try:
+            import accelerate  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def _move_batch_to_device(self, inputs):
+        moved = {}
+        for key, value in inputs.items():
+            if not hasattr(value, 'to'):
+                moved[key] = value
+                continue
+
+            if self._device == 'cuda' and getattr(value, 'is_floating_point', lambda: False)():
+                moved[key] = value.to(device=self._device, dtype=self._torch_dtype)
+            else:
+                moved[key] = value.to(self._device)
+        return moved
+
+    def _load_qwen_model(self, model_dir):
+        try:
+            from transformers.models.qwen2_5_vl import (
+                Qwen2_5_VLForConditionalGeneration,
+                Qwen2_5_VLProcessor as QwenProcessor,
+            )
+            model_api = 'qwen2_5_vl'
+        except Exception:
+            from transformers.models.qwen2_vl import (
+                Qwen2VLForConditionalGeneration as Qwen2_5_VLForConditionalGeneration,
+                Qwen2VLProcessor as QwenProcessor,
+            )
+            model_api = 'qwen2_vl'
+
+        self._log_error('INFO', f'Using transformers API: {model_api}')
+        self._processor = QwenProcessor.from_pretrained(model_dir, trust_remote_code=True, local_files_only=True)
+        use_device_map = self._device == 'cuda' and self._accelerate_available()
         self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_dir,
-            torch_dtype=torch_dtype,
-            device_map='auto' if torch.cuda.is_available() else None,
+            trust_remote_code=True,
+            local_files_only=True,
+            torch_dtype=self._torch_dtype,
+            device_map='auto' if use_device_map else None,
         )
-        # If accelerate device_map present, skip .to(device)
         has_device_map = bool(getattr(self._model, 'hf_device_map', None) or getattr(self._model, 'device_map', None))
         if not has_device_map:
-            self._model.to(device)
+            self._model.to(self._device)
         self._model.eval()
+        rospy.loginfo('VLM Loader: loaded Qwen backend from %s', model_dir)
+
+    def _load_florence_model(self, model_dir):
+        from transformers import AutoModelForCausalLM, AutoProcessor
+
+        self._processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True, local_files_only=True)
+        self._model = AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            trust_remote_code=True,
+            local_files_only=True,
+            torch_dtype=self._torch_dtype,
+        ).to(self._device)
+        self._model.eval()
+        rospy.loginfo('VLM Loader: loaded Florence-2 backend from %s', model_dir)
 
     def _on_vlm_query(self, msg: StringMsg):
-        # Expect JSON: {"request_id": str, "type": "instruction"|"vision_query", "text": str, "need_image": bool}
         try:
             payload = json.loads(msg.data)
         except Exception as e:
@@ -140,115 +256,132 @@ class VLMModelLoaderNode:
         qtype = payload.get('type', 'instruction')
         text = (payload.get('text') or '').strip()
 
-        # Backward compatibility: accept legacy payloads sent by core_node.handle_aruco_detection
-        # Legacy shape: {"image_available": bool, "aruco_markers": [...], "query": "..."}
-        # Normalize to vision_query when type is missing and query is present
         if ('type' not in payload) and ('query' in payload):
             qtype = 'vision_query'
             text = str(payload.get('query') or '').strip()
             need_image = bool(payload.get('image_available', True))
 
-        # Fallback to offline parsing when model is not loaded or explicitly requested
-        if (not self.model_loaded or self._model is None or self._processor is None) and qtype.startswith('instruction'):
-            try:
-                subtasks = self._offline_parse_subtasks(text)
-            except Exception as e:
-                subtasks = []
-                self._log_error('ERROR', f'offline parse failed: {e}')
-            resp = {'request_id': request_id, 'subtasks': subtasks}
-            self.vlm_response_pub.publish(StringMsg(data=json.dumps(resp)))
+        if qtype == 'instruction_offline':
+            response = {'request_id': request_id, 'subtasks': self._safe_offline_parse(text)}
+            self.vlm_response_pub.publish(StringMsg(data=json.dumps(response)))
             return
 
-        if qtype == 'instruction_offline':
-            try:
-                subtasks = self._offline_parse_subtasks(text)
-            except Exception as e:
-                subtasks = []
-                self._log_error('ERROR', f'offline parse failed: {e}')
-            resp = {'request_id': request_id, 'subtasks': subtasks}
-            self.vlm_response_pub.publish(StringMsg(data=json.dumps(resp)))
+        if qtype.startswith('instruction') and self.backend != 'qwen':
+            response = {
+                'request_id': request_id,
+                'subtasks': self._safe_offline_parse(text),
+                'backend': self.backend,
+            }
+            self.vlm_response_pub.publish(StringMsg(data=json.dumps(response)))
             return
 
         try:
             if need_image:
-                response = self._run_vision(text)
+                if not self.model_loaded or self._model is None or self._processor is None:
+                    response = self._offline_vision_query(payload)
+                elif self.backend == 'qwen':
+                    response = self._run_qwen_vision(text)
+                else:
+                    response = self._offline_vision_query(payload)
             else:
-                response = self._run_text(text)
+                if not self.model_loaded or self.backend != 'qwen':
+                    response = {'subtasks': self._safe_offline_parse(text), 'backend': self.backend}
+                else:
+                    response = self._run_qwen_text(text)
         except Exception as e:
             response = {'request_id': request_id, 'error': f'inference_failed: {e}'}
-        # Ensure request_id is present
+
         if isinstance(response, dict):
             response.setdefault('request_id', request_id)
         self.vlm_response_pub.publish(StringMsg(data=json.dumps(response)))
 
-    def _run_text(self, instruction: str):
-        import torch
-        # build prompt/messages for parsing subtasks
-        messages = self._build_messages(instruction)
+    def _run_qwen_text(self, instruction):
+        messages = [{"role": "user", "content": [{"type": "text", "text": instruction}]}]
         inputs = self._processor.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True, return_tensors='pt'
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors='pt',
         ).to(self._model.device)
+
         gen_kwargs = {
             'max_new_tokens': int(rospy.get_param('~llm_max_new_tokens', 128)),
             'do_sample': bool(rospy.get_param('~llm_do_sample', False)),
         }
         if gen_kwargs['do_sample']:
-            try:
-                gen_kwargs['temperature'] = float(rospy.get_param('~llm_temperature', 0.7))
-            except Exception:
-                pass
-        with torch.no_grad():
+            gen_kwargs['temperature'] = float(rospy.get_param('~llm_temperature', 0.7))
+
+        with self._torch.no_grad():
             outputs = self._model.generate(inputs, **gen_kwargs)
         gen_ids = outputs[0][inputs.shape[1]:]
         tokenizer = getattr(self._processor, 'tokenizer', None)
-        if tokenizer is not None:
-            response = tokenizer.decode(gen_ids, skip_special_tokens=True)
-        else:
-            response = self._processor.decode(gen_ids, skip_special_tokens=True)
-        # Try parse JSON array, fallback to []
+        response_text = tokenizer.decode(gen_ids, skip_special_tokens=True) if tokenizer is not None else self._processor.decode(gen_ids, skip_special_tokens=True)
         try:
-            data = json.loads(response.strip())
+            data = json.loads(response_text.strip())
         except Exception:
-            data = self._extract_json(response)
+            data = self._extract_json(response_text)
         if not isinstance(data, list):
             data = []
         return {'subtasks': data}
 
-    def _run_vision(self, query_text: str):
-        import torch
+    def _run_qwen_vision(self, query_text):
         if self.latest_cv_image is None:
             return {'error': 'no_image'}
         try:
             import cv2
+
             rgb = cv2.cvtColor(self.latest_cv_image, cv2.COLOR_BGR2RGB)
             pil_image = PILImage.fromarray(rgb)
         except Exception as e:
             return {'error': f'image_convert_failed: {e}'}
-        inputs = self._processor(text=query_text, images=[pil_image], return_tensors='pt').to(self._model.device)
+
+        inputs = self._processor(text=query_text, images=[pil_image], return_tensors='pt')
+        inputs = self._move_batch_to_device(inputs)
         gen_kwargs = {
             'max_new_tokens': int(rospy.get_param('~llm_max_new_tokens', 128)),
             'do_sample': bool(rospy.get_param('~llm_do_sample', False)),
         }
         if gen_kwargs['do_sample']:
-            try:
-                gen_kwargs['temperature'] = float(rospy.get_param('~llm_temperature', 0.7))
-            except Exception:
-                pass
-        with torch.no_grad():
+            gen_kwargs['temperature'] = float(rospy.get_param('~llm_temperature', 0.7))
+
+        with self._torch.no_grad():
             outputs = self._model.generate(**inputs, **gen_kwargs)
+
         tokenizer = getattr(self._processor, 'tokenizer', None)
-        if tokenizer is not None:
-            response_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        else:
-            response_text = self._processor.decode(outputs[0], skip_special_tokens=True)
+        response_text = tokenizer.decode(outputs[0], skip_special_tokens=True) if tokenizer is not None else self._processor.decode(outputs[0], skip_special_tokens=True)
         data = self._extract_json(response_text)
-        return {'vision_result': data}
+        return {'vision_result': data, 'vision_result_text': response_text}
 
-    def _build_messages(self, instruction: str):
-        messages = [{"role": "user", "content": [{"type": "text", "text": instruction}]}]
-        return messages
+    def _offline_vision_query(self, payload):
+        markers = payload.get('aruco_markers') or []
+        if len(markers) == 1:
+            return {
+                'target_found': True,
+                'target_aruco_id': markers[0].get('id'),
+                'reason': 'single_marker_fallback',
+                'backend': self.backend,
+            }
 
-    def _extract_json(self, text: str):
+        query_text = str(payload.get('query') or payload.get('text') or '')
+        ids = re.findall(r'\b(\d{1,3})\b', query_text)
+        if ids:
+            wanted = int(ids[0])
+            for marker in markers:
+                if int(marker.get('id')) == wanted:
+                    return {
+                        'target_found': True,
+                        'target_aruco_id': wanted,
+                        'reason': 'query_id_match_fallback',
+                        'backend': self.backend,
+                    }
+
+        return {
+            'target_found': False,
+            'reason': 'no_supported_vqa_backend',
+            'backend': self.backend,
+        }
+
+    def _extract_json(self, text):
         m = re.search(r'\[.*\]', text, re.DOTALL)
         if not m:
             return []
@@ -257,19 +390,18 @@ class VLMModelLoaderNode:
         except Exception:
             return []
 
-    def _offline_parse_subtasks(self, instruction: str):
-        """
-        启发式离线解析：将自然语言指令解析为规范 JSON 子任务列表。
-        规则：
-        - 方向关键词：forward/backward/left/right（支持常见同义词）
-        - 提取简单目标名词作为 goal（若无则为 null）
-        - 至少返回一个元素；若未命中方向，默认 forward。
-        """
+    def _safe_offline_parse(self, instruction):
+        try:
+            return self._offline_parse_subtasks(instruction)
+        except Exception as e:
+            self._log_error('ERROR', f'offline parse failed: {e}')
+            return []
+
+    def _offline_parse_subtasks(self, instruction):
         text = (instruction or '').strip().lower()
         if not text:
             return []
 
-        # 同义词映射（含中英文）
         dir_map = {
             'forward': [r'forward', r'ahead', r'straight', r'go on', r'move on', r'向前', r'前进', r'直走', r'直行'],
             'backward': [r'backward', r'back', r'reverse', r'向后', r'后退'],
@@ -278,43 +410,36 @@ class VLMModelLoaderNode:
         }
 
         directions = []
-        for d, pats in dir_map.items():
-            for p in pats:
-                if re.search(rf'\b{p}\b', text):
-                    directions.append(d)
+        for direction, patterns in dir_map.items():
+            for pattern in patterns:
+                if re.search(rf'\b{pattern}\b', text):
+                    directions.append(direction)
                     break
 
-        # 简单目标提取：
-        # 英文: "to the <noun>" / "at the <noun>" / "to <noun>"
-        # 中文: "到<名词>" / "去<名词>" / "到<名词>旁边/那里/位置"
         goal = None
-        m = re.search(r'\bto\s+the\s+([a-z_\- ]{2,})', text)
-        if not m:
-            m = re.search(r'\bat\s+the\s+([a-z_\- ]{2,})', text)
-        if not m:
-            m = re.search(r'\bto\s+([a-z_\- ]{2,})', text)
-        # 中文目标
-        if not m:
-            m = re.search(r'到([\u4e00-\u9fa5a-z0-9_\-]{1,8})(?:那|旁边|那里|位置)?', text)
-        if not m:
-            m = re.search(r'去([\u4e00-\u9fa5a-z0-9_\-]{1,8})(?:那|旁边|那里|位置)?', text)
-        if m:
-            # 取短语首词
-            goal = m.group(1).strip().split(' ')[0]
+        match = re.search(r'\bto\s+the\s+([a-z_\- ]{2,})', text)
+        if not match:
+            match = re.search(r'\bat\s+the\s+([a-z_\- ]{2,})', text)
+        if not match:
+            match = re.search(r'\bto\s+([a-z_\- ]{2,})', text)
+        if not match:
+            match = re.search(r'到([\u4e00-\u9fa5a-z0-9_\-]{1,8})(?:那|旁边|那里|位置)?', text)
+        if not match:
+            match = re.search(r'去([\u4e00-\u9fa5a-z0-9_\-]{1,8})(?:那|旁边|那里|位置)?', text)
+        if match:
+            goal = match.group(1).strip().split(' ')[0]
 
-        # 若没有方向，默认 forward
         if not directions:
             directions = ['forward']
 
-        subtasks = []
-        for idx, d in enumerate(directions, start=1):
-            subtasks.append({f'subtask_{idx}': d, 'goal': goal})
-        return subtasks
+        return [{f'subtask_{idx}': direction, 'goal': goal} for idx, direction in enumerate(directions, start=1)]
+
 
 def main():
     rospy.init_node('vlm_loader', anonymous=False)
     _ = VLMModelLoaderNode()
     rospy.spin()
+
 
 if __name__ == '__main__':
     main()

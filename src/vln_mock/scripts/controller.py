@@ -1,4 +1,4 @@
-#!/catkin_ws/venv310/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import rospy
@@ -17,6 +17,14 @@ from magv_vln_msgs.msg import PositionCommand, PathPoint, VehicleStatus
 class Controller:
     def __init__(self):
         rospy.loginfo("Controller initializing...")
+
+        self.cmd_vel_topic = rospy.get_param('~cmd_vel_topic', '/magv/omni_drive_controller/cmd_vel')
+        self.odometry_topic = rospy.get_param('~odometry_topic', '/magv/odometry/gt')
+        self.world_goal_topic = rospy.get_param('~world_goal_topic', '/world_goal')
+        self.body_goal_topic = rospy.get_param('~body_goal_topic', '/body_goal')
+        self.velocity_goal_topic = rospy.get_param('~velocity_goal_topic', '/velocity_goal')
+        self.path_point_topic = rospy.get_param('~path_point_topic', '/path_point')
+        self.vln_status_topic = rospy.get_param('~vln_status_topic', '/vln_status')
 
         # State variables
         self.current_pose = None
@@ -65,16 +73,16 @@ class Controller:
         self.orientation_error_prev = 0.0
 
         # Publishers
-        self.cmd_vel_pub = rospy.Publisher('/magv/omni_drive_controller/cmd_vel', Twist, queue_size=10)
+        self.cmd_vel_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=10)
         self.status_pub = rospy.Publisher('/controller_status', PoseStamped, queue_size=10)
 
         # Subscribers
-        self.odometry_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
-        self.world_goal_sub = rospy.Subscriber('/world_goal', PositionCommand, self.world_goal_callback, queue_size=1)
-        self.body_goal_sub = rospy.Subscriber('/body_goal', PositionCommand, self.body_goal_callback, queue_size=1)
-        self.velocity_goal_sub = rospy.Subscriber('/velocity_goal', Twist, self.velocity_goal_callback, queue_size=1)
-        self.path_point_sub = rospy.Subscriber('/path_point', PathPoint, self.path_point_callback, queue_size=1)
-        self.vln_status_sub = rospy.Subscriber('/vln_status', VehicleStatus, self.vln_status_callback, queue_size=1)
+        self.odometry_sub = rospy.Subscriber(self.odometry_topic, Odometry, self.odometry_callback, queue_size=1)
+        self.world_goal_sub = rospy.Subscriber(self.world_goal_topic, PositionCommand, self.world_goal_callback, queue_size=1)
+        self.body_goal_sub = rospy.Subscriber(self.body_goal_topic, PositionCommand, self.body_goal_callback, queue_size=1)
+        self.velocity_goal_sub = rospy.Subscriber(self.velocity_goal_topic, Twist, self.velocity_goal_callback, queue_size=1)
+        self.path_point_sub = rospy.Subscriber(self.path_point_topic, PathPoint, self.path_point_callback, queue_size=1)
+        self.vln_status_sub = rospy.Subscriber(self.vln_status_topic, VehicleStatus, self.vln_status_callback, queue_size=1)
 
         # Control timer
         self.control_timer = rospy.Timer(rospy.Duration(0.05), self.control_loop)  # 20Hz control loop

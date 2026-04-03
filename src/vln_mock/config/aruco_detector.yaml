@@ -1,0 +1,13 @@
+marker_size: 1.0
+marker_id: 0
+image_topic: /magv/camera/image_compressed/compressed
+image_width: 1080
+image_height: 720
+horizontal_fov: 2.0
+camera_translation_x: 0.5
+camera_translation_y: -0.04
+camera_translation_z: 0.57
+camera_pitch: 0.314
+detection_threshold: 0.3
+max_history_size: 10
+output_frame_id: base_footprint

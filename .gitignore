@@ -1,7 +1,12 @@
 build/
 devel/
+install/
+build_*/
+devel_*/
+install_*/
 .catkin_workspace
 .vscode
+.codex
 venv310
 **/__pycache__/
 **/*.pyc

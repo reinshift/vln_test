@@ -1,4 +1,4 @@
-#!/catkin_ws/venv310/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import rospy
@@ -41,6 +41,7 @@ class ArucoDetectorNode:
         # Dedup parameters
         self.detection_threshold = float(rospy.get_param('~detection_threshold', 0.3))  # meters
         self.max_history_size = int(rospy.get_param('~max_history_size', 10))
+        self.output_frame_id = rospy.get_param('~output_frame_id', 'base_footprint')
 
         # Topics
         self.image_topic = rospy.get_param('~image_topic', '/magv/camera/image_compressed/compressed')
@@ -164,7 +165,7 @@ class ArucoDetectorNode:
 
             if out_markers:
                 info = ArucoInfo()
-                info.header = Header(stamp=rospy.Time.now(), frame_id='base_footprint')
+                info.header = Header(stamp=rospy.Time.now(), frame_id=self.output_frame_id)
                 info.markers = out_markers
                 self.info_pub.publish(info)
         except Exception as e:
@@ -178,10 +179,11 @@ class ArucoDetectorNode:
         py = float(p_cam[1])
         pz = float(p_cam[2])
         p_nominal = np.array([pz, -px, -py], dtype=np.float32)  # [x_b, y_b, z_b] without pitch
-        # Apply pitch rotation around base Y (downward pitch positive)
+        # Apply pitch rotation around base Y (downward pitch positive).
+        # Positive downward pitch means the optical forward axis tilts toward -Z in base frame.
         c = math.cos(self.camera_pitch)
         s = math.sin(self.camera_pitch)
-        R_y = np.array([[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]], dtype=np.float32)
+        R_y = np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=np.float32)
         p_rot = R_y.dot(p_nominal)
         # Add camera translation in base frame
         p_base = self.t_base_cam + p_rot
@@ -211,4 +213,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

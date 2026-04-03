@@ -1,4 +1,4 @@
-#!/catkin_ws/venv310/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import rospy
@@ -27,6 +27,23 @@ from magv_vln_msgs.msg import ArucoInfo, ArucoMarker
 class CoreNode:
     def __init__(self):
         rospy.loginfo("Core Node initializing...")
+
+        self.world_goal_topic = rospy.get_param('~world_goal_topic', '/world_goal')
+        self.body_goal_topic = rospy.get_param('~body_goal_topic', '/body_goal')
+        self.velocity_goal_topic = rospy.get_param('~velocity_goal_topic', '/velocity_goal')
+        self.cmd_vel_topic = rospy.get_param('~cmd_vel_topic', '/magv/omni_drive_controller/cmd_vel')
+        self.vln_status_topic = rospy.get_param('~vln_status_topic', '/vln_status')
+        self.occupancy_grid_topic = rospy.get_param('~occupancy_grid_topic', '/occupancy_grid')
+        self.aruco_info_topic = rospy.get_param('~aruco_info_topic', '/aruco_info')
+        self.image_topic = rospy.get_param('~image_topic', '/magv/camera/image_compressed/compressed')
+        self.vlm_response_topic = rospy.get_param('~vlm_response_topic', '/vlm_response')
+        self.odometry_topic = rospy.get_param('~odometry_topic', '/magv/odometry/gt')
+        self.grounding_detections_topic = rospy.get_param('~grounding_detections_topic', '/grounding_dino/detections')
+        self.path_point_topic = rospy.get_param('~path_point_topic', '/path_point')
+        self.core_feedback_topic = rospy.get_param('~core_feedback_topic', '/core_feedback')
+        self.vlm_query_topic = rospy.get_param('~vlm_query_topic', '/vlm_query')
+        self.final_status_topic = rospy.get_param('~final_status_topic', '/status')
+        self.grounding_prompt_topic = rospy.get_param('~grounding_prompt_topic', '/grounding_dino/prompt')
 
         # State variables
         self.current_state = VehicleStatus.STATE_IDLE
@@ -70,26 +87,25 @@ class CoreNode:
         # Publishers
         self.value_map_pub = rospy.Publisher('/value_map', ValueMap, queue_size=1)
         self.value_map_preview_pub = rospy.Publisher('/value_map_preview', Float32MultiArray, queue_size=1)
-        self.path_point_pub = rospy.Publisher('/path_point', PathPoint, queue_size=10)
-        self.controller_discrete_pub = rospy.Publisher('/world_goal', PositionCommand, queue_size=10)
-        self.controller_body_pub = rospy.Publisher('/body_goal', PositionCommand, queue_size=10)
+        self.path_point_pub = rospy.Publisher(self.path_point_topic, PathPoint, queue_size=10)
+        self.controller_discrete_pub = rospy.Publisher(self.world_goal_topic, PositionCommand, queue_size=10)
+        self.controller_body_pub = rospy.Publisher(self.body_goal_topic, PositionCommand, queue_size=10)
         # Prefer sending velocity goals to the controller so it can enforce limits
-        self.controller_continuous_pub = rospy.Publisher('/magv/omni_drive_controller/cmd_vel', Twist, queue_size=10)
-        self.controller_velocity_pub = rospy.Publisher('/velocity_goal', Twist, queue_size=10)
-        self.status_feedback_pub = rospy.Publisher('/core_feedback', String, queue_size=10)
-        self.vlm_query_pub = rospy.Publisher('/vlm_query', String, queue_size=10)
-        self.final_status_pub = rospy.Publisher('/status', Int32, queue_size=10)
-        self.dino_prompt_pub = rospy.Publisher('/grounding_dino/prompt', String, queue_size=10)
+        self.controller_continuous_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=10)
+        self.controller_velocity_pub = rospy.Publisher(self.velocity_goal_topic, Twist, queue_size=10)
+        self.status_feedback_pub = rospy.Publisher(self.core_feedback_topic, String, queue_size=10)
+        self.vlm_query_pub = rospy.Publisher(self.vlm_query_topic, String, queue_size=10)
+        self.final_status_pub = rospy.Publisher(self.final_status_topic, Int32, queue_size=10)
+        self.dino_prompt_pub = rospy.Publisher(self.grounding_prompt_topic, String, queue_size=10)
 
         # Subscribers
-        self.vln_status_sub = rospy.Subscriber('/vln_status', VehicleStatus, self.vln_status_callback, queue_size=1)
-        self.occupancy_grid_sub = rospy.Subscriber('/occupancy_grid', OccupancyGrid, self.occupancy_grid_callback, queue_size=1)
-        self.aruco_info_sub = rospy.Subscriber('/aruco_info', ArucoInfo, self.aruco_info_callback, queue_size=1)
-        # Subscribe to the correct compressed image topic from rosbag
-        self.image_sub = rospy.Subscriber('/magv/camera/image_compressed/compressed', CompressedImage, self.image_callback, queue_size=1)
-        self.vlm_response_sub = rospy.Subscriber('/vlm_response', String, self.vlm_response_callback, queue_size=1)
-        self.odometry_sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odometry_callback, queue_size=1)
-        self.dino_detections_sub = rospy.Subscriber('/grounding_dino/detections', Detection2DArray, self.dino_detections_callback, queue_size=1)
+        self.vln_status_sub = rospy.Subscriber(self.vln_status_topic, VehicleStatus, self.vln_status_callback, queue_size=1)
+        self.occupancy_grid_sub = rospy.Subscriber(self.occupancy_grid_topic, OccupancyGrid, self.occupancy_grid_callback, queue_size=1)
+        self.aruco_info_sub = rospy.Subscriber(self.aruco_info_topic, ArucoInfo, self.aruco_info_callback, queue_size=1)
+        self.image_sub = rospy.Subscriber(self.image_topic, CompressedImage, self.image_callback, queue_size=1)
+        self.vlm_response_sub = rospy.Subscriber(self.vlm_response_topic, String, self.vlm_response_callback, queue_size=1)
+        self.odometry_sub = rospy.Subscriber(self.odometry_topic, Odometry, self.odometry_callback, queue_size=1)
+        self.dino_detections_sub = rospy.Subscriber(self.grounding_detections_topic, Detection2DArray, self.dino_detections_callback, queue_size=1)
 
 
         # Parameters
@@ -118,6 +134,7 @@ class CoreNode:
         self.dir_weight = rospy.get_param('~dir_weight', 1.0)
         self.dino_weight = rospy.get_param('~dino_weight', 0.3)
         self.dino_value_gain = rospy.get_param('~dino_value_gain', 200.0)
+        self.value_noise_stddev = float(rospy.get_param('~value_noise_stddev', 0.0))
 
 
         # Value map smoothing (softmax-like) temperature; 0 disables smoothing
@@ -518,8 +535,8 @@ class CoreNode:
                     continue
 
                 # Convert grid coordinates to world coordinates
-                world_x = self.occupancy_grid.info.origin.position.x + x * self.occupancy_grid.info.resolution
-                world_y = self.occupancy_grid.info.origin.position.y + y * self.occupancy_grid.info.resolution
+                world_x = self.occupancy_grid.info.origin.position.x + (x + 0.5) * self.occupancy_grid.info.resolution
+                world_y = self.occupancy_grid.info.origin.position.y + (y + 0.5) * self.occupancy_grid.info.resolution
 
                 # Compute value based on direction preference
                 value = self.compute_cell_value(world_x, world_y, direction, goal, current_yaw)
@@ -621,7 +638,7 @@ class CoreNode:
                     goal_seen = True
                     confidence_bonus = detection.score
                     angle_bonus = 1 - (abs(angle_diff) / half_width_angle) # 1 at center, 0 at edge
-                    distance = math.sqrt(x**2 + y**2)
+                    distance = math.hypot(rx, ry)
                     distance_penalty = math.exp(-0.1 * distance) # Prefer closer areas
 
                     # DINO sector score (scaled)
@@ -725,7 +742,8 @@ class CoreNode:
                 except Exception:
                     pass
 
-        base_value += np.random.normal(0, 1.0)
+        if self.value_noise_stddev > 0.0:
+            base_value += np.random.normal(0.0, self.value_noise_stddev)
         return base_value
 
     def normalize_angle(self, angle):
@@ -760,8 +778,8 @@ class CoreNode:
             max_y, max_x = max_yx[0], max_yx[1]
 
             # Convert pixel coordinates to world coordinates
-            world_x = self.value_map.info.origin.position.x + max_x * self.value_map.info.resolution
-            world_y = self.value_map.info.origin.position.y + max_y * self.value_map.info.resolution
+            world_x = self.value_map.info.origin.position.x + (max_x + 0.5) * self.value_map.info.resolution
+            world_y = self.value_map.info.origin.position.y + (max_y + 0.5) * self.value_map.info.resolution
 
             # Create a new PathPoint
             point = PathPoint()
@@ -948,6 +966,10 @@ class CoreNode:
             self.navigation_active = True
             return
 
+        if isinstance(response, dict) and 'subtasks' in response and 'vision_result' not in response and 'target_found' not in response:
+            rospy.logdebug("Ignoring instruction parsing response in core_node")
+            return
+
         # Primary expected schema
         if response.get("target_found", False):
             # If already locked, ignore further VLM selection
@@ -1093,22 +1115,6 @@ class CoreNode:
             self.aruco_close_counter = 0
         # Require fewer consecutive checks since goal is fixed
         return self.aruco_close_counter >= 2
-
-        # yaw: relative rotation in body frame to face the target point
-        try:
-            cmd.yaw = math.atan2(marker.pose.position.y, marker.pose.position.x)
-        except Exception:
-            cmd.yaw = 0.0
-        cmd.yaw_dot = 0.0
-
-        # Publish to body_goal so controller converts to world frame
-        self.controller_body_pub.publish(cmd)
-
-        # Set flag that we found the final target
-        self.task_completed = True
-
-        # Wait a bit then notify completion
-        rospy.Timer(rospy.Duration(5.0), self.final_completion_callback, oneshot=True)
 
     def final_completion_callback(self, event):
         """Handle final task completion"""

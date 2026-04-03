@@ -28,10 +28,15 @@ catkin_install_python(PROGRAMS
   scripts/vehicle_status_manager.py
   scripts/instruction_latch_bridge.py
   scripts/odom_tf_broadcaster.py
+  scripts/vln_operator_gui.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 # Install launch files
 install(DIRECTORY launch
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+
+install(DIRECTORY config
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )

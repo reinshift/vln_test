@@ -1,4 +1,4 @@
-#!/catkin_ws/venv310/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import rospy
@@ -10,10 +10,16 @@ class OdomTFBroadcaster:
     def __init__(self):
         rospy.init_node('odom_tf_broadcaster', anonymous=True)
         self.br = tf.TransformBroadcaster()
+        self.odometry_topic = rospy.get_param('~odometry_topic', '/magv/odometry/gt')
         self.default_child = rospy.get_param('~default_child_frame_id', 'magv/base_link')
         self.alias_child = rospy.get_param('~alias_child_frame_id', '')  # optional alias
-        self.sub = rospy.Subscriber('/magv/odometry/gt', Odometry, self.odom_cb, queue_size=10)
-        rospy.loginfo('odom_tf_broadcaster started. default_child=%s alias_child=%s', self.default_child, self.alias_child)
+        self.sub = rospy.Subscriber(self.odometry_topic, Odometry, self.odom_cb, queue_size=10)
+        rospy.loginfo(
+            'odom_tf_broadcaster started. odom_topic=%s default_child=%s alias_child=%s',
+            self.odometry_topic,
+            self.default_child,
+            self.alias_child,
+        )
 
     def odom_cb(self, msg: Odometry):
         parent = msg.header.frame_id or 'map'
@@ -42,4 +48,3 @@ if __name__ == '__main__':
         rospy.spin()
     except rospy.ROSInterruptException:
         pass
-

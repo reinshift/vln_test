@@ -1,0 +1,35 @@
+[
+  {
+    "name": "cone_gate_to_bench",
+    "instruction": "go through the two cones and stop near the bench",
+    "spawn": {
+      "x": -3.5,
+      "y": -2.8,
+      "z": 0.14,
+      "yaw": 0.0
+    },
+    "timeout_sec": 90
+  },
+  {
+    "name": "marker_board_front",
+    "instruction": "find the marker board on the wall and stop in front of it",
+    "spawn": {
+      "x": -2.7,
+      "y": 0.0,
+      "z": 0.14,
+      "yaw": 1.57
+    },
+    "timeout_sec": 90
+  },
+  {
+    "name": "tree_then_finish",
+    "instruction": "move to the tree and then head to the yellow finish area",
+    "spawn": {
+      "x": -3.5,
+      "y": -2.8,
+      "z": 0.14,
+      "yaw": 0.0
+    },
+    "timeout_sec": 120
+  }
+]

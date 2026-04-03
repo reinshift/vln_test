@@ -1,0 +1,93 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="vln_aruco_board">
+    <static>true</static>
+    <link name="board_link">
+      <collision name="board_collision">
+        <pose>0 0 1.0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.04 1.1 1.1</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <visual name="board_frame">
+        <pose>0 0 1.0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.045 1.18 1.18</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/FlatBlack</name>
+          </script>
+        </material>
+      </visual>
+
+      <visual name="board_face">
+        <pose>0.023 0 1.0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.006 1.02 1.02</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <uri>model://vln_aruco_board/materials/scripts</uri>
+            <uri>model://vln_aruco_board/materials/textures</uri>
+            <name>VLN/ArucoBoard</name>
+          </script>
+        </material>
+      </visual>
+
+      <visual name="board_back">
+        <pose>-0.023 0 1.0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.006 1.02 1.02</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/PaintedWall</name>
+          </script>
+        </material>
+      </visual>
+
+      <visual name="support_post">
+        <pose>0 0 0.45 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.04</radius>
+            <length>0.9</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/DarkGrey</name>
+          </script>
+        </material>
+      </visual>
+
+      <visual name="support_base">
+        <pose>0 0 0.05 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.45 0.45 0.10</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Grey</name>
+          </script>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>
