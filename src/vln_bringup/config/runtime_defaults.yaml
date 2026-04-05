@@ -1,0 +1,10 @@
+mission_raw_instruction_topic: /vln/mission/raw_instruction
+mission_compiled_topic: /vln/mission/compiled
+runtime_state_topic: /vln/runtime/state
+semantic_map_topic: /vln/world/semantic_map
+trajectory_topic: /vln/planning/trajectory
+command_topic: /vln/control/command
+safe_command_topic: /sim/uav/cmd_vel
+scan_topic: /sim/uav/scan
+odom_topic: /sim/uav/odom
+

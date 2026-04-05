@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="sim_backend" default="px4"/>
+  <arg name="enable_instruction_gateway" default="true"/>
+  <arg name="tasks_file" default=""/>
+  <arg name="px4_autopilot_dir" default="$(optenv PX4_AUTOPILOT_DIR '')"/>
+  <arg name="world_name" default="campus_stub"/>
+  <arg name="headless" default="false"/>
+  <arg name="px4_work_dir" default="sitl_iris_vln_rgb_lidar_default"/>
+
+  <node pkg="vln_sim" type="world_profile_node.py" name="world_profile_node" output="screen">
+    <rosparam command="load" file="$(find vln_bringup)/config/mock_world_profile.yaml"/>
+  </node>
+
+  <node pkg="vln_sim" type="episode_reset_service_node.py" name="episode_reset_service_node" output="screen">
+    <param name="tasks_file" value="$(arg tasks_file)"/>
+  </node>
+
+  <node if="$(eval arg('sim_backend') == 'mock')" pkg="vln_sim" type="mock_uav_bridge_node.py" name="mock_uav_bridge_node" output="screen"/>
+  <include if="$(eval arg('sim_backend') == 'px4')" file="$(find vln_bringup)/launch/px4_contract.launch">
+    <arg name="px4_autopilot_dir" value="$(arg px4_autopilot_dir)"/>
+    <arg name="world_name" value="$(arg world_name)"/>
+    <arg name="headless" value="$(arg headless)"/>
+    <arg name="px4_work_dir" value="$(arg px4_work_dir)"/>
+  </include>
+
+  <node if="$(arg enable_instruction_gateway)" pkg="vln_perception" type="instruction_gateway_node.py" name="instruction_gateway_node" output="screen"/>
+  <node pkg="vln_runtime" type="mission_manager_node.py" name="mission_manager_node" output="screen"/>
+  <node pkg="vln_perception" type="landmark_grounding_node.py" name="landmark_grounding_node" output="screen"/>
+  <node pkg="vln_perception" type="aruco_node.py" name="aruco_node" output="screen"/>
+  <node pkg="vln_runtime" type="semantic_map_node.py" name="semantic_map_node" output="screen"/>
+  <node pkg="vln_runtime" type="planner_node.py" name="planner_node" output="screen"/>
+  <node pkg="vln_runtime" type="controller_node.py" name="controller_node" output="screen"/>
+  <node pkg="vln_runtime" type="safety_supervisor_node.py" name="safety_supervisor_node" output="screen"/>
+</launch>

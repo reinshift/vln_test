@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="sim_backend" default="px4"/>
+  <arg name="enable_instruction_gateway" default="false"/>
+  <arg name="tasks_file" default="$(find vln_bringup)/../../tests/goldens/mock_uav_tasks.json"/>
+  <arg name="px4_autopilot_dir" default="$(optenv PX4_AUTOPILOT_DIR '')"/>
+  <arg name="world_name" default="campus_stub"/>
+  <arg name="headless" default="true"/>
+  <arg name="px4_work_dir" default="sitl_iris_vln_rgb_lidar_eval"/>
+
+  <include file="$(find vln_bringup)/launch/simulation.launch">
+    <arg name="sim_backend" value="$(arg sim_backend)"/>
+    <arg name="enable_instruction_gateway" value="$(arg enable_instruction_gateway)"/>
+    <arg name="tasks_file" value="$(arg tasks_file)"/>
+    <arg name="px4_autopilot_dir" value="$(arg px4_autopilot_dir)"/>
+    <arg name="headless" value="$(arg headless)"/>
+    <arg name="world_name" value="$(arg world_name)"/>
+    <arg name="px4_work_dir" value="$(arg px4_work_dir)"/>
+  </include>
+</launch>

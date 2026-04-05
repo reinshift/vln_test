@@ -1,0 +1,20 @@
+[
+  {
+    "name": "tree_then_finish",
+    "world_name": "campus_stub",
+    "instruction": "move to the tree and then head to the yellow finish area",
+    "goal": {"x": 12.0, "y": 4.0, "z": 0.0},
+    "goal_tolerance_m": 0.5,
+    "spawn": {"x": 0.0, "y": 0.0, "z": 1.5, "yaw": 0.0},
+    "timeout_sec": 60
+  },
+  {
+    "name": "bench_only",
+    "world_name": "urban_courtyard",
+    "instruction": "go to the bench",
+    "goal": {"x": 8.0, "y": 2.0, "z": 0.0},
+    "goal_tolerance_m": 0.5,
+    "spawn": {"x": 0.0, "y": 0.0, "z": 1.5, "yaw": 0.0},
+    "timeout_sec": 60
+  }
+]

@@ -1,0 +1,5 @@
+string episode_name
+bool hard_reset
+---
+bool accepted
+string message

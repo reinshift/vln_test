@@ -1,0 +1,15 @@
+{
+  "uav": {
+    "name": "px4_iris_rgb_rplidar",
+    "provider": "px4",
+    "reference": "https://docs.px4.io/v1.14/en/sim_gazebo_classic/",
+    "launch_target": "repo_local_iris_vln_rgb_lidar",
+    "cache_subdir": "robots/px4_iris_rgb_rplidar"
+  },
+  "rover_stub": {
+    "name": "clearpath_jackal_phase2",
+    "provider": "clearpath",
+    "reference": "https://docs.clearpathrobotics.com/docs_robots/legacy/ros1_robots/outdoor_robots/jackal/tutorials_jackal/",
+    "cache_subdir": "robots/jackal_phase2"
+  }
+}

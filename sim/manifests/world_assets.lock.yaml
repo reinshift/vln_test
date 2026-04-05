@@ -1,0 +1,70 @@
+{
+  "fuel_models": [
+    {
+      "owner": "OpenRobotics",
+      "name": "Oak tree",
+      "version": 7,
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "cache_dir": "sim/cache/assets/fuel/Oak tree"
+    },
+    {
+      "owner": "OpenRobotics",
+      "name": "Pine Tree",
+      "version": 6,
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "cache_dir": "sim/cache/assets/fuel/Pine Tree"
+    },
+    {
+      "owner": "OpenRobotics",
+      "name": "Lamp Post",
+      "version": 3,
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "cache_dir": "sim/cache/assets/fuel/Lamp Post"
+    },
+    {
+      "owner": "OpenRobotics",
+      "name": "FoodCourtBenchShort",
+      "version": 2,
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "cache_dir": "sim/cache/assets/fuel/FoodCourtBenchShort"
+    },
+    {
+      "owner": "OpenRobotics",
+      "name": "Prius Hybrid",
+      "version": 3,
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "cache_dir": "sim/cache/assets/fuel/Prius Hybrid"
+    }
+  ],
+  "worlds": [
+    {
+      "name": "campus_stub",
+      "template": "sim/worlds/templates/campus_stub.world.jinja",
+      "required_models": [
+        "Oak tree",
+        "Pine Tree",
+        "Lamp Post",
+        "FoodCourtBenchShort",
+        "Prius Hybrid"
+      ],
+      "theme": "outdoor_campus_vln"
+    },
+    {
+      "name": "urban_courtyard",
+      "template": "sim/worlds/templates/urban_courtyard.world.jinja",
+      "required_models": [
+        "Oak tree",
+        "Pine Tree",
+        "Lamp Post",
+        "FoodCourtBenchShort",
+        "Prius Hybrid"
+      ],
+      "theme": "outdoor_courtyard_vln"
+    }
+  ]
+}

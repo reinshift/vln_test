@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<launch>
+  <include file="$(find vln_bringup)/launch/simulation.launch">
+    <arg name="sim_backend" value="px4"/>
+    <arg name="enable_instruction_gateway" value="true"/>
+    <arg name="headless" value="false"/>
+    <arg name="world_name" value="campus_stub"/>
+  </include>
+</launch>

@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>vln_sim</name>
+  <version>0.1.0</version>
+  <description>Simulation bridges and vehicle adapters for the UAV-first VLN stack.</description>
+  <maintainer email="codex@example.com">Codex</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>catkin_python_setup</build_depend>
+  <depend>geometry_msgs</depend>
+  <depend>gazebo_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>vln_msgs</depend>
+  <exec_depend>vln_core</exec_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>mavros</exec_depend>
+  <exec_depend>mavros_msgs</exec_depend>
+  <exec_depend>topic_tools</exec_depend>
+
+  <export/>
+</package>

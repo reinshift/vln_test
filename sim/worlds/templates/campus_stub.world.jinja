@@ -1,0 +1,328 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="campus_stub">
+    <gravity>0 0 -9.81</gravity>
+
+    <scene>
+      <ambient>0.72 0.74 0.75 1</ambient>
+      <background>0.52 0.69 0.91 1</background>
+      <shadows>true</shadows>
+      <sky>
+        <clouds>
+          <speed>4</speed>
+        </clouds>
+      </sky>
+    </scene>
+
+    <gui fullscreen="0">
+      <camera name="overview">
+        <pose>-8 -26 18 0 0.45 0.95</pose>
+      </camera>
+    </gui>
+
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <model name="campus_ground">
+      <static>true</static>
+      <pose>0 0 -0.1 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>120 120 0.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <cast_shadows>false</cast_shadows>
+          <geometry>
+            <box>
+              <size>120 120 0.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.21 0.33 0.18 1</ambient>
+            <diffuse>0.27 0.42 0.22 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="campus_drive_lane">
+      <static>true</static>
+      <pose>5.0 -11.5 0 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <pose>0 0 0.012 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>42 8 0.024</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.15 0.16 0.18 1</ambient>
+            <diffuse>0.20 0.21 0.24 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="campus_main_walk">
+      <static>true</static>
+      <pose>5.0 1.4 0 0 0 0.12</pose>
+      <link name="link">
+        <visual name="visual">
+          <pose>0 0 0.016 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>20 3.2 0.03</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.50 0.49 0.46 1</ambient>
+            <diffuse>0.63 0.62 0.58 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="campus_cross_walk">
+      <static>true</static>
+      <pose>8.3 4.8 0 0 0 1.57</pose>
+      <link name="link">
+        <visual name="visual">
+          <pose>0 0 0.017 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>9 2.8 0.03</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.50 0.49 0.46 1</ambient>
+            <diffuse>0.63 0.62 0.58 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="campus_entry_pad">
+      <static>true</static>
+      <pose>1.4 -0.8 0 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <pose>0 0 0.014 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>6 3.4 0.028</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.50 0.49 0.46 1</ambient>
+            <diffuse>0.63 0.62 0.58 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="campus_lawn_core">
+      <static>true</static>
+      <pose>4.8 3.9 0 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <pose>0 0 0.01 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>17 10 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.18 0.31 0.15 1</ambient>
+            <diffuse>0.24 0.44 0.18 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="west_academic_block">
+      <static>true</static>
+      <pose>-22 3 4.2 0 0 0.08</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>14 26 8.4</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="body">
+          <geometry>
+            <box>
+              <size>14 26 8.4</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.47 0.41 0.35 1</ambient>
+            <diffuse>0.60 0.53 0.46 1</diffuse>
+          </material>
+        </visual>
+        <visual name="glass_strip">
+          <pose>7.03 0 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 22 3.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.30 0.45 0.55 1</ambient>
+            <diffuse>0.40 0.58 0.72 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="east_library_block">
+      <static>true</static>
+      <pose>27 -1 4.5 0 0 -0.06</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>16 20 9</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="body">
+          <geometry>
+            <box>
+              <size>16 20 9</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.56 0.57 0.58 1</ambient>
+            <diffuse>0.69 0.70 0.71 1</diffuse>
+          </material>
+        </visual>
+        <visual name="entry_glass">
+          <pose>-8.03 0 0.0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 9 4.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.28 0.44 0.56 1</ambient>
+            <diffuse>0.36 0.57 0.72 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="north_lawn_edge">
+      <static>true</static>
+      <pose>5 13.5 0 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <pose>0 0 0.02 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>36 1 0.04</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.42 0.42 0.39 1</ambient>
+            <diffuse>0.54 0.54 0.51 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <include>
+      <name>target_tree</name>
+      <uri>model://Oak tree</uri>
+      <pose>4 6 0 0 0 0</pose>
+    </include>
+    <include>
+      <name>pine_northwest</name>
+      <uri>model://Pine Tree</uri>
+      <pose>-3 10 0 0 0 0</pose>
+    </include>
+    <include>
+      <name>pine_northeast</name>
+      <uri>model://Pine Tree</uri>
+      <pose>14 10 0 0 0 0</pose>
+    </include>
+    <include>
+      <name>oak_southwest</name>
+      <uri>model://Oak tree</uri>
+      <pose>-5 -3 0 0 0 0</pose>
+    </include>
+
+    <include>
+      <name>bench_plaza</name>
+      <uri>model://FoodCourtBenchShort</uri>
+      <pose>8 2 0 0 0 1.57</pose>
+    </include>
+    <include>
+      <name>bench_quad</name>
+      <uri>model://FoodCourtBenchShort</uri>
+      <pose>1 -1 0 0 0 -1.57</pose>
+    </include>
+
+    <include>
+      <name>lamp_south_entry</name>
+      <uri>model://Lamp Post</uri>
+      <pose>0 -2.5 0 0 0 0</pose>
+    </include>
+    <include>
+      <name>lamp_center</name>
+      <uri>model://Lamp Post</uri>
+      <pose>7 4.5 0 0 0 0</pose>
+    </include>
+    <include>
+      <name>lamp_finish</name>
+      <uri>model://Lamp Post</uri>
+      <pose>12 6.5 0 0 0 0</pose>
+    </include>
+
+    <include>
+      <name>parked_prius</name>
+      <uri>model://Prius Hybrid</uri>
+      <pose>9.5 -11.3 0 0 0 1.57</pose>
+    </include>
+
+    <include>
+      <name>finish_area</name>
+      <uri>model://vln_finish_zone</uri>
+      <pose>12 4 0 0 0 0</pose>
+    </include>
+    <include>
+      <name>marker_board</name>
+      <uri>model://vln_marker_board</uri>
+      <pose>10 -2 0 0 0 -0.4</pose>
+    </include>
+
+    <include>
+      <name>planter_east_1</name>
+      <uri>model://vln_planter_box</uri>
+      <pose>14 1 0 0 0 0</pose>
+    </include>
+    <include>
+      <name>planter_east_2</name>
+      <uri>model://vln_planter_box</uri>
+      <pose>14 6 0 0 0 0</pose>
+    </include>
+    <include>
+      <name>planter_west</name>
+      <uri>model://vln_planter_box</uri>
+      <pose>-1 4 0 0 0 0</pose>
+    </include>
+
+    <include>
+      <name>planter_south_entry</name>
+      <uri>model://vln_planter_box</uri>
+      <pose>2 -2 0 0 0 0</pose>
+    </include>
+  </world>
+</sdf>

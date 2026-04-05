@@ -1,0 +1,9 @@
+asset,source,license,notes
+px4_iris_rgb_rplidar,https://docs.px4.io/v1.14/en/sim_gazebo_classic/,upstream project license,external cache only
+Oak tree,https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree,CC0-1.0,downloaded to sim/cache/assets/fuel/Oak tree
+Pine Tree,https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine%20Tree,CC0-1.0,downloaded to sim/cache/assets/fuel/Pine Tree
+Lamp Post,https://fuel.gazebosim.org/1.0/OpenRobotics/models/Lamp%20Post,CC0-1.0,downloaded to sim/cache/assets/fuel/Lamp Post
+FoodCourtBenchShort,https://fuel.gazebosim.org/1.0/OpenRobotics/models/FoodCourtBenchShort,CC0-1.0,downloaded to sim/cache/assets/fuel/FoodCourtBenchShort
+Prius Hybrid,https://fuel.gazebosim.org/1.0/OpenRobotics/models/Prius%20Hybrid,CC0-1.0,downloaded to sim/cache/assets/fuel/Prius Hybrid
+poly_haven_textures,https://polyhaven.com/license,CC0,approved for generated worlds
+ambientcg_textures,https://docs.ambientcg.com/license/,CC0,approved for generated worlds

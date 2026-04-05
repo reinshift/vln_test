@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="world_name" default="campus_stub"/>
+  <arg name="tasks_file" default="$(find vln_bringup)/../../tests/goldens/mock_uav_tasks.json"/>
+  <arg name="autostart_sim" default="true"/>
+  <arg name="geometry" default="1440x860"/>
+
+  <node if="$(arg autostart_sim)" pkg="vln_bringup" type="operator_gui.py" name="vln_operator_gui" output="screen"
+        args="--world-name $(arg world_name) --tasks-file $(arg tasks_file) --geometry $(arg geometry)"/>
+
+  <node unless="$(arg autostart_sim)" pkg="vln_bringup" type="operator_gui.py" name="vln_operator_gui" output="screen"
+        args="--world-name $(arg world_name) --tasks-file $(arg tasks_file) --geometry $(arg geometry) --no-autostart-sim"/>
+</launch>

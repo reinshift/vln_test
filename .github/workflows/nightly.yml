@@ -1,0 +1,41 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  nightly-regression:
+    runs-on: ubuntu-20.04
+    env:
+      PX4_GIT_REF: v1.14.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up ROS Noetic
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-pip \
+            python3-venv \
+            python3-catkin-tools \
+            ros-noetic-catkin \
+            ros-noetic-gazebo-ros-pkgs \
+            ros-noetic-mavros \
+            ros-noetic-mavros-extras \
+            ros-noetic-topic-tools \
+            geographiclib-tools
+      - name: Install MAVROS geographiclib datasets
+        run: sudo /opt/ros/noetic/lib/mavros/install_geographiclib_datasets.sh
+      - name: Provision PX4 checkout
+        run: |
+          git clone --depth 1 --branch "${PX4_GIT_REF}" https://github.com/PX4/PX4-Autopilot.git /tmp/PX4-Autopilot
+          echo "PX4_AUTOPILOT_DIR=/tmp/PX4-Autopilot" >> "$GITHUB_ENV"
+      - name: Prepare venv
+        run: python3 -m venv venv310
+      - name: Install Python helpers
+        run: |
+          source venv310/bin/activate
+          pip install catkin_pkg
+      - name: Validate baseline
+        run: make validate

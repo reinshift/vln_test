@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="px4_autopilot_dir" default="$(optenv PX4_AUTOPILOT_DIR '')"/>
+  <arg name="world_name" default="campus_stub"/>
+  <arg name="headless" default="true"/>
+  <arg name="world_file" default="$(find vln_bringup)/../../sim/worlds/generated/$(arg world_name).world"/>
+  <arg name="vehicle_name" default="iris_vln_rgb_lidar"/>
+  <arg name="vehicle_sdf" default="$(find vln_bringup)/../../sim/models/iris_vln_rgb_lidar/iris_vln_rgb_lidar.sdf"/>
+  <arg name="vehicle_spawn_z" default="0.35"/>
+  <arg name="px4_sys_autostart" default="10015"/>
+  <arg name="px4_work_dir" default="sitl_iris_vln_rgb_lidar_default"/>
+  <arg name="rgb_source_topic" default="/image_raw"/>
+  <arg name="depth_source_topic" default=""/>
+  <arg name="scan_source_topic" default="/laser/scan"/>
+
+  <group if="$(eval arg('px4_autopilot_dir') != '')">
+    <env name="PX4_SYS_AUTOSTART" value="$(arg px4_sys_autostart)"/>
+    <env name="PX4_SIM_MODEL" value="gazebo-classic_iris"/>
+    <param name="/use_sim_time" value="true"/>
+
+    <node name="sitl" pkg="px4" type="px4" output="screen" required="true"
+          args="$(arg px4_autopilot_dir)/build/px4_sitl_default/etc -s etc/init.d-posix/rcS -i 0 -w $(arg px4_work_dir) -d"/>
+
+    <node name="gazebo" pkg="gazebo_ros" type="gzserver" output="screen"
+          args="-e ode $(arg world_file)"/>
+
+    <node unless="$(arg headless)" name="gazebo_gui" pkg="gazebo_ros" type="gzclient" output="screen"/>
+
+    <node name="$(anon vehicle_spawn)" pkg="vln_sim" type="spawn_vehicle_node.py" output="screen">
+      <param name="model_file" value="$(arg vehicle_sdf)"/>
+      <param name="model_name" value="$(anon iris_vln_vehicle)"/>
+      <param name="x" value="0.0"/>
+      <param name="y" value="0.0"/>
+      <param name="z" value="$(arg vehicle_spawn_z)"/>
+      <param name="roll" value="0.0"/>
+      <param name="pitch" value="0.0"/>
+      <param name="yaw" value="0.0"/>
+      <param name="startup_delay_sec" value="2.5"/>
+      <param name="retry_delay_sec" value="2.0"/>
+      <param name="max_attempts" value="4"/>
+      <param name="delete_if_exists" value="false"/>
+    </node>
+
+    <include file="$(find mavros)/launch/px4.launch">
+      <arg name="gcs_url" value=""/>
+      <arg name="fcu_url" value="udp://:14540@localhost:14557"/>
+      <arg name="respawn_mavros" value="false"/>
+    </include>
+
+    <node pkg="vln_sim" type="px4_uav_bridge_node.py" name="px4_uav_bridge_node" output="screen">
+      <param name="rgb_source_topic" value="$(arg rgb_source_topic)"/>
+      <param name="depth_source_topic" value="$(arg depth_source_topic)"/>
+      <param name="scan_source_topic" value="$(arg scan_source_topic)"/>
+    </node>
+  </group>
+</launch>
